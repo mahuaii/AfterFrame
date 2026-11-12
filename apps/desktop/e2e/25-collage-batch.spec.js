@@ -344,6 +344,25 @@ test.describe("Batch collage", () => {
     }).toBe(false);
   });
 
+  // After the colour-reading tests above: they count on the fixture's order.
+  test("Shuffle deals the pool into another order; the pages keep their structure", async () => {
+    const listNames = () => window.locator("[data-testid='batch-panel'] [data-testid='collage-image-list'] span").allTextContents();
+    const before = await listNames();
+    await window.getByTestId("collage-shuffle").click();
+    // Another order of the same photos, every time.
+    await expect.poll(listNames).not.toEqual(before);
+    const after = await listNames();
+    expect([...after].sort()).toEqual([...before].sort());
+    await window.getByTestId("collage-shuffle").click();
+    await expect.poll(listNames).not.toEqual(after);
+    await expect(window.getByText("14 images · 7 per collage · 2 collages")).toBeVisible();
+    // A sort set afterwards wins; shuffling again drops back to a manual order.
+    await window.getByRole("button", { name: "Filename", exact: true }).click();
+    await expect.poll(listNames).toEqual([...before].sort());
+    await window.getByTestId("collage-shuffle").click();
+    await expect.poll(listNames).not.toEqual([...before].sort());
+  });
+
   test("export to folder writes one JPEG per page and registers them", async () => {
     // Stub the native directory picker (register() holds a reference to the
     // same dialog module object, so mutating it here reaches the handler).
@@ -361,14 +380,24 @@ test.describe("Batch collage", () => {
     await window.getByRole("button", { name: /Export 2 to folder/ }).click();
 
     const expected = ["collage_01.jpg", "collage_02.jpg"].map((n) => path.join(exportDir, n));
+    // sharp writes each page straight to its final name, so a file that
+    // exists with bytes in it may still be mid-write (a slow CI runner read a
+    // "premature end of JPEG" here). Wait until every file decodes.
+    const metadataOf = async (file) => {
+      try {
+        return fs.existsSync(file) ? await sharp(file).metadata() : null;
+      } catch {
+        return null;
+      }
+    };
     await expect.poll(
-      () => expected.every((p) => fs.existsSync(p) && fs.statSync(p).size > 0),
+      async () => (await Promise.all(expected.map(metadataOf))).every(Boolean),
       { timeout: 30_000 },
     ).toBe(true);
 
     // Default export: 4096px wide, 1:1 ratio
     for (const file of expected) {
-      const meta = await sharp(file).metadata();
+      const meta = await metadataOf(file);
       expect(meta.format).toBe("jpeg");
       expect(meta.width).toBe(4096);
       expect(meta.height).toBe(4096);

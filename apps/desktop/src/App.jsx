@@ -44,6 +44,7 @@ import { sidebarViews } from "../features/index.js";
 import { useView as useStickerView } from "../features/sticker/renderer/index.js";
 import PeopleView from "./components/PeopleView";
 import FoldersView from "./components/FoldersView";
+import { descendantIds, flattenForPicker, pathOf } from "./components/folderTree";
 import PeopleInspector from "./components/PeopleInspector";
 import usePeopleGroups from "./hooks/usePeopleGroups";
 import DesignSystemPanel from "./components/DesignSystemPanel";
@@ -51,6 +52,8 @@ import ToastStack, { useToasts } from "./components/Toast";
 import DevStaleNotice from "./components/DevStaleNotice";
 import { ConfirmHost, confirm, choose } from "./components/confirm";
 import TagBatchDialog from "./components/TagBatchDialog";
+import FindByListDialog from "./components/FindByListDialog";
+import TagsView from "./components/TagsView";
 import { isBinding, loadShortcuts, matchShortcut, shortcutLabel } from "./shortcuts/store";
 import useAnnotationJob from "./components/annotation/useAnnotationJob";
 import { invalidateAnnotations } from "./components/annotation/annotationStore";
@@ -97,7 +100,8 @@ export default function App() {
   // null opens the tab it was left on.
   const [settingsTab, setSettingsTab] = useState(null);
   // The photos "Add Tags…" is open for (null when it's closed).
-  const [tagDialogIds, setTagDialogIds] = useState(null);
+  const [tagDialog, setTagDialog] = useState(null); // { ids, mode: "add" | "remove" }
+  const [findListOpen, setFindListOpen] = useState(false);
   const [sampleBusy, setSampleBusy] = useState(false);
   const [proofMode, setProofMode] = useState(false);
   const [layoutItems, setLayoutItems] = useState([]);
@@ -785,11 +789,15 @@ export default function App() {
     if (paths.length) workspace.addImagesFromPaths(paths);
   }
 
+  // The Folders and Tags pages have no photo to select, so the Inspector would
+  // only ever show its empty state: the pane is left out and the page takes
+  // its width.
+  const inspectorHidden = viewMode === "folders" || viewMode === "tags";
   const layoutStyle = {
     gridTemplateColumns: [
       `${workspace.sidebarWidth}px`,
       "minmax(0, 1fr)",
-      `${workspace.inspectorWidth}px`,
+      ...(inspectorHidden ? [] : [`${workspace.inspectorWidth}px`]),
     ].join(" "),
     gridTemplateRows: "minmax(0, 1fr)",
   };
@@ -830,28 +838,81 @@ export default function App() {
     if (advance) advanceAfter(targetIds);
   }
 
+  // B: the selected photos join the target folder, the one last made or last
+  // added to (hooks/targetFolder.js). Without one, a hint says how to get one.
+  async function addToTargetFolder(ids, { advance = false } = {}) {
+    const folder = workspace.targetFolder;
+    if (!folder) {
+      pushToast({
+        title: t("targetFolder.none"),
+        message: t("targetFolder.noneHint", { key: shortcutLabel("folder.addToTarget") || "B" }),
+        ttl: 5000,
+      });
+      return;
+    }
+    if (advance) advanceAfter(ids);
+    try {
+      await workspace.addToCollection(folder.collection_id, ids);
+      pushToast({ title: t("targetFolder.added", { count: ids.length, name: folder.name }), ttl: 3000 });
+    } catch (error) {
+      pushToast({ title: t("targetFolder.failed", { name: folder.name }), message: String(error?.message || error), tone: "error", ttl: 6000 });
+    }
+  }
+
   function openSettings(tab = null) {
     setSettingsTab(tab);
     setSettingsOpen(true);
   }
 
-  function openTagDialog(ids) {
-    const list = (ids?.length ? ids : targetAssetIds()).filter(Boolean);
-    if (list.length) setTagDialogIds(list);
+  // "Find by List…": the photos a client's list names go into a folder, an
+  // existing one or a new one (made inside the folder on screen, when there
+  // is one), and that folder is where the user lands to look them over.
+  async function addPickList({ assetIds, folderId, newFolderName }) {
+    try {
+      const folder = folderId
+        ? workspace.collections.find((c) => c.collection_id === folderId)
+        : await workspace.createCollection(newFolderName, workspace.activeCollectionId || null);
+      if (!folder?.collection_id) throw new Error("folder not found");
+      await workspace.addToCollection(folder.collection_id, assetIds);
+      setFindListOpen(false);
+      pushToast({ title: tNav("findList.added", { count: assetIds.length, name: folder.name }), ttl: 5000 });
+      goToGallery();
+      clearPeopleGroupFilter();
+      workspace.selectCollection(folder.collection_id);
+    } catch (error) {
+      pushToast({ title: tNav("findList.failed"), message: String(error?.message || error), tone: "error", ttl: 6000 });
+    }
   }
 
-  async function applyBatchTags(tags) {
-    const ids = tagDialogIds || [];
+  // …or the grid shows them, in the place on screen: the list replaces the
+  // search text and the other filters, so what the dialog counted is what
+  // shows. The filter bar keeps the list as a chip (and cannot be hidden
+  // while it filters).
+  function filterByPickList(keywords) {
+    setFindListOpen(false);
+    workspace.setQuery("");
+    workspace.setFilters({ name_contains: keywords.length === 1 ? keywords[0] : keywords });
+    setShowFilters(true);
+  }
+
+  function openTagDialog(ids, mode = "add") {
+    const list = (ids?.length ? ids : targetAssetIds()).filter(Boolean);
+    if (list.length) setTagDialog({ ids: list, mode });
+  }
+
+  async function applyBatchTags(tags, mode = "add") {
+    const ids = tagDialog?.ids || [];
+    const removing = mode === "remove";
     try {
-      const result = await workspace.addTagsToAssets(ids, tags);
-      setTagDialogIds(null);
+      const result = removing ? await workspace.removeTagsFromAssets(ids, tags) : await workspace.addTagsToAssets(ids, tags);
+      setTagDialog(null);
       pushToast({
-        title: t("batchTags.added", { count: result?.asset_ids?.length ?? ids.length }),
+        title: t(removing ? "batchTags.removed" : "batchTags.added", { count: result?.asset_ids?.length ?? ids.length }),
         message: tags.join(t("batchTags.separator")),
         ttl: 3500,
       });
     } catch (error) {
-      pushToast({ title: t("batchTags.failed"), message: String(error?.message || error), tone: "error", ttl: 6000 });
+      pushToast({ title: t(removing ? "batchTags.removeFailed" : "batchTags.failed"), message: String(error?.message || error), tone: "error", ttl: 6000 });
     }
   }
 
@@ -965,7 +1026,12 @@ export default function App() {
     : null;
   // The folders a filter can name ("in / not in"), and the dialog that edits
   // the bar's "any of these groups".
-  const manualFolders = useMemo(() => (workspace.collections || []).filter((c) => c.kind === "manual"), [workspace.collections]);
+  // Folders nest: the pickers list them depth-first with their depth, so a
+  // menu can indent them and a chip can show the path.
+  const manualFolders = useMemo(
+    () => flattenForPicker(workspace.collections, { locale: i18n.language }).map(({ folder, depth }) => ({ ...folder, depth })),
+    [workspace.collections],
+  );
   const [filterGroupsOpen, setFilterGroupsOpen] = useState(false);
 
   async function rewriteSmartCollection() {
@@ -1013,6 +1079,10 @@ export default function App() {
         if (!hasTarget) return false;
         openTagDialog();
         return true;
+      case "photo.removeTags":
+        if (!hasTarget) return false;
+        openTagDialog(null, "remove");
+        return true;
       case "photo.edit":
         if (!lightboxOpen && !workspace.selectedAssetId) return false;
         openEditor();
@@ -1032,6 +1102,12 @@ export default function App() {
       case "photo.deleteRejected":
         void deleteRejected();
         return true;
+      case "folder.addToTarget": {
+        const ids = keyTargets();
+        if (!ids.length) return false;
+        void addToTargetFolder(ids, { advance });
+        return true;
+      }
       case "select.all":
         return selectAllAssets();
       case "select.none":
@@ -1087,7 +1163,7 @@ export default function App() {
     }
     // The rest belong to the grid and the lightbox: not while the editor,
     // a compare, a collage or a dialog is over them.
-    if (editorItem || viewMode === "people" || compareState || collageItems || tagDialogIds) return;
+    if (editorItem || viewMode === "people" || compareState || collageItems || tagDialog || findListOpen) return;
     if (event.defaultPrevented || typing) return;
 
     if (featureView) {
@@ -1182,16 +1258,20 @@ export default function App() {
             workspace.selectCollection(id);
           }}
           onCreateCollection={workspace.createCollection}
+          onMoveCollection={workspace.moveCollection}
           onReorderCollections={workspace.reorderCollections}
           reorderingCollections={workspace.reorderingCollections}
           onRenameCollection={workspace.renameCollection}
           onDeleteCollection={workspace.deleteCollection}
           onAnnotateCollection={(collectionId) => runAnnotation(null, { scope: "collection", collectionId, onlyMissing: true })}
           onAddToCollection={workspace.addToCollection}
+          targetFolderId={workspace.targetFolder?.collection_id || null}
           activeView={viewMode}
           peopleMode={viewMode === "people"}
           discoverMode={viewMode === "discover"}
           foldersMode={viewMode === "folders"}
+          tagsMode={viewMode === "tags"}
+          onOpenTags={() => openView("tags")}
           onOpenDiscover={() => openView("discover")}
           onOpenView={(id) => {
             openView(id);
@@ -1244,6 +1324,17 @@ export default function App() {
                 onOpenFolders={() => openView("folders")}
               />
             </>
+          ) : viewMode === "tags" ? (
+            <TagsView
+              catalogRevision={workspace.catalogRevision}
+              onOpenTag={(tag) => {
+                goToGallery();
+                clearPeopleGroupFilter();
+                workspace.setFilters({ ...(workspace.filters || {}), tag });
+                setShowFilters(true);
+              }}
+              pushToast={pushToast}
+            />
           ) : viewMode === "folders" ? (
             <FoldersView
               collections={workspace.collections}
@@ -1253,6 +1344,7 @@ export default function App() {
                 workspace.selectCollection(id);
               }}
               onCreateFolder={workspace.createCollection}
+              onMoveFolder={workspace.moveCollection}
               onRenameFolder={workspace.renameCollection}
               onDeleteFolder={workspace.deleteCollection}
               onAnnotateFolder={(collectionId) => runAnnotation(null, { scope: "collection", collectionId, onlyMissing: true })}
@@ -1262,14 +1354,23 @@ export default function App() {
             <>
               <Toolbar
                 title={workspace.activeCollectionId
-                  ? (workspace.collections.find((c) => c.collection_id === workspace.activeCollectionId)?.name || "Folder")
+                  ? (pathOf(workspace.collections, workspace.activeCollectionId) || "Folder")
                   : (activeSmartCollection?.name
                     || (workspace.similarTo ? tNav("browse.similar")
                       : peopleGroup ? (peopleGroup.name?.trim() || tNav("filter.person")) : tNav(`browse.${workspace.status}`, filterTitle(workspace.status))))}
                 query={workspace.query}
                 setQuery={workspace.setQuery}
+                onFindByList={() => setFindListOpen(true)}
+                onPickTag={(tag) => {
+                  workspace.setQuery("");
+                  workspace.setFilters({ ...(workspace.filters || {}), tag });
+                  setShowFilters(true);
+                }}
                 sort={workspace.sort}
                 inFolder={!!workspace.activeCollectionId}
+                hasSubfolders={!!workspace.activeCollectionId && descendantIds(workspace.collections, workspace.activeCollectionId).length > 0}
+                includeDescendants={workspace.includeDescendants}
+                onToggleDescendants={workspace.setIncludeDescendants}
                 setSort={workspace.setSort}
                 refreshAll={() => workspace.refreshAll()}
                 onAddProcessed={workspace.addImages}
@@ -1305,6 +1406,7 @@ export default function App() {
                   facetScope={workspace.facetScope}
                   folders={manualFolders}
                   onEditGroups={() => setFilterGroupsOpen(true)}
+                  onEditNames={() => setFindListOpen(true)}
                   smart={{
                     canSave: workspace.canSaveSmartCollection,
                     dirty: workspace.smartCollectionDirty,
@@ -1361,6 +1463,7 @@ export default function App() {
                   expanded={mapExpanded}
                   status={workspace.status}
                   collectionId={workspace.activeCollectionId}
+                  includeDescendants={workspace.includeDescendants}
                   search={workspace.query}
                   filters={workspace.filters}
                   base={workspace.activeBase}
@@ -1406,6 +1509,7 @@ export default function App() {
                   thumbSize={thumbSize}
                   collections={workspace.collections}
                   activeCollectionId={workspace.activeCollectionId}
+                  targetFolderId={workspace.targetFolder?.collection_id || null}
                   onAddToCollection={workspace.addToCollection}
                   onRemoveFromCollection={workspace.removeFromCollection}
                   onDeleteFromCatalog={deleteAssets}
@@ -1424,6 +1528,7 @@ export default function App() {
                   onAnnotate={(ids, opts) => runAnnotation(ids, opts)}
                   onFlag={(flag, ids) => applyFlag(flag, { ids })}
                   onAddTags={openTagDialog}
+                  onRemoveTags={(ids) => openTagDialog(ids, "remove")}
                   onFindSimilar={api.has("findSimilar") ? findSimilar : undefined}
                   onShowInAllAssets={workspace.narrowed ? showInAllAssets : undefined}
                 />
@@ -1441,7 +1546,7 @@ export default function App() {
           )}
         </section>
 
-        {featureView ? (
+        {inspectorHidden ? null : featureView ? (
           <featureView.Inspector view={featureViewState} />
         ) : viewMode === "people" ? (
           <PeopleInspector
@@ -1452,8 +1557,7 @@ export default function App() {
           />
         ) : (
           <Inspector
-            // The folder page has no photo selection; the pane shows its empty state.
-            detail={viewMode === "folders" ? null : workspace.detail}
+            detail={workspace.detail}
             onRatingChange={applyRating}
             onFlagChange={(flag) => applyFlag(flag)}
             onDescriptionChange={(text) => workspace.setAssetDescription([workspace.detail?.asset_id], text)}
@@ -1485,12 +1589,14 @@ export default function App() {
           style={{ left: `${workspace.sidebarWidth}px` }}
         />
 
-        <div
-          data-value={-workspace.inspectorWidth}
-          onMouseDown={resizeInspector}
-          className="pane-resize-handle absolute inset-y-0 z-20 w-3 translate-x-1/2 cursor-col-resize"
-          style={{ right: `${workspace.inspectorWidth}px` }}
-        />
+        {!inspectorHidden && (
+          <div
+            data-value={-workspace.inspectorWidth}
+            onMouseDown={resizeInspector}
+            className="pane-resize-handle absolute inset-y-0 z-20 w-3 translate-x-1/2 cursor-col-resize"
+            style={{ right: `${workspace.inspectorWidth}px` }}
+          />
+        )}
       </div>
 
       {/* Single bottom-right surface: running-job cards stacked above
@@ -1524,11 +1630,32 @@ export default function App() {
         summary={workspace.summary}
         onSwitchCatalog={workspace.switchCatalog}
       />
-      {tagDialogIds && (
+      {tagDialog && (
         <TagBatchDialog
-          count={tagDialogIds.length}
+          assetIds={tagDialog.ids}
+          count={tagDialog.ids.length}
+          mode={tagDialog.mode}
           onApply={applyBatchTags}
-          onClose={() => setTagDialogIds(null)}
+          onClose={() => setTagDialog(null)}
+        />
+      )}
+      {findListOpen && (
+        <FindByListDialog
+          // The place alone: the search box and the filter bar do not narrow a list lookup.
+          place={{
+            status: workspace.status,
+            collectionId: workspace.activeCollectionId || undefined,
+            includeDescendants: workspace.activeCollectionId ? workspace.includeDescendants : undefined,
+            base: workspace.activeBase || undefined,
+          }}
+          placeName={workspace.activeCollectionId
+            ? (pathOf(workspace.collections, workspace.activeCollectionId) || "")
+            : (activeSmartCollection?.name || tNav(`browse.${workspace.status}`, filterTitle(workspace.status)))}
+          initialKeywords={[workspace.filters?.name_contains ?? []].flat().map(String)}
+          folders={manualFolders}
+          onFilter={filterByPickList}
+          onApply={addPickList}
+          onClose={() => setFindListOpen(false)}
         />
       )}
       <ConfirmHost />

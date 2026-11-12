@@ -56,7 +56,14 @@ test("the rows carry the page's columns", async () => {
 });
 
 test("the page lists every folder, newest addition first, with cover and count", async () => {
+  // The gallery has the Inspector beside it; the Folders page, where no photo
+  // can be selected, leaves the pane out and runs to the window's edge.
+  const panes = w().locator(".grid > aside");
+  await expect(panes).toHaveCount(2);
   await openFoldersPage();
+  await expect(panes).toHaveCount(1);
+  const page = await w().locator(".grid > section").boundingBox();
+  expect((await w().evaluate(() => window.innerWidth)) - (page.x + page.width)).toBeLessThanOrEqual(9);
   await expect(w().getByTestId("folders-count")).toHaveText("· 3");
   await expect(cards()).toHaveCount(3);
   // Kyoto got its photo last; Scratch never got one and sinks to the end.
@@ -112,8 +119,10 @@ test("the list view is a table with the same rows, sortable by its headers", asy
   await expect(cards()).toHaveCount(3);
   await expect.poll(names).toEqual(["Trip Tokyo", "Trip Kyoto", "Scratch"]);
   const tokyo = table.locator("tr[data-folder-id]").filter({ hasText: "Trip Tokyo" });
-  await expect(tokyo.locator("td").nth(3)).toHaveText("2");
-  await expect(tokyo.locator("td").nth(5)).toContainText(/now|ago|minute/);
+  // Columns: select, cover, name, location (nested folders), count, capture span, last added, created.
+  await expect(tokyo.locator("td").nth(3)).toHaveText("—");
+  await expect(tokyo.locator("td").nth(4)).toHaveText("2");
+  await expect(tokyo.locator("td").nth(6)).toContainText(/now|ago|minute/);
   await table.getByRole("button", { name: "Name" }).click();
   await expect.poll(names).toEqual(["Scratch", "Trip Kyoto", "Trip Tokyo"]);
   await expect(w().getByTestId("folders-sort")).toHaveText("Name");

@@ -47,11 +47,14 @@ export const SHORTCUT_ACTIONS = [
   })),
 
   { id: "photo.addTags", group: "organize", scope: "library", defaults: ["KeyT"] },
+  { id: "photo.removeTags", group: "organize", scope: "library", defaults: ["Shift+KeyT"] },
   { id: "photo.edit", group: "organize", scope: "library", defaults: ["KeyE"] },
   { id: "photo.compare", group: "organize", scope: "gallery", defaults: ["KeyC"] },
   { id: "photo.reveal", group: "organize", scope: "library", defaults: ["Mod+Enter"] },
   { id: "photo.delete", group: "organize", scope: "library", defaults: ["Backspace", "Delete"] },
   { id: "photo.deleteRejected", group: "organize", scope: "library", defaults: ["Mod+Backspace"] },
+  // Lightroom's target collection: the folder last made or last added to.
+  { id: "folder.addToTarget", group: "organize", scope: "library", defaults: ["KeyB"], advance: true },
 
   { id: "select.all", group: "browse", scope: "gallery", defaults: ["Mod+KeyA"], menu: "edit:select-all" },
   { id: "select.none", group: "browse", scope: "gallery", defaults: ["Mod+KeyD"] },

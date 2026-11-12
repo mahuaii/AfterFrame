@@ -1,5 +1,11 @@
 # AfterFrame Agent Native 设计：内嵌 MCP Server
 
+> 状态：2026-11-09 「含 RAW」从侧栏降级为筛选项：search_assets 与 manage_collections 的 rules 加 `has_raw`（true / false；sidecar facet `has_raw`，db/facets.py），status "matched" 仍可用。
+
+> 状态：2026-11-09 标签分组（schema 14，docs/tags-redesign.md）：新增 manage_tags（建组 / 改名 / 开关 AI 填充 / 删组 / 移组 / 重命名 / 合并 / 删除 / 置顶 / 按词表归组），list_tags 按组返回（groups / ungrouped / 扁平 tags，带 count、pinned、aliases），search_assets 加 tag_group 与 tag_match: by_group，update_assets 加 tag_group；initialize 的领域模型多了 TAG / TAG GROUP 一段 —— 38 tools。
+>
+> 状态：2026-11-09 文件夹嵌套（schema 13，`collections.parent_collection_id` 启用）：`manage_collections` 的 `create` 收 `parent_id`，新 action `move`（collection_id + parent_id，空为顶层），`browse` 收 `include_descendants`，`list` 每行带 `parent_collection_id / path / depth / subtree_count`（item_count 仍是直接成员数），`delete` 连同子文件夹一起删并返回 `deleted`；`search_assets` / `browse_map` 与智能合集 rules 的 `collection_id` 旁加 `include_descendants`（sidecar facet 修饰键 `in_collection_descendants`）。
+>
 > 状态：2026-10-14 近似重复（docs/local-models-plan.md A）：新增 find_similar / list_lookalikes / index_lookalikes，search_assets 加 similar_to —— 37 tools。
 
 > 状态：2026-08-16 parity Phase 1 落地（docs/mcp-parity-plan.md）：17→30 tools —— 新增 list_people/get_person/update_person/index_people、browse_map/set_asset_location（sidecar 新命令 set-asset-location，manual > exif > ai）、maintain_library、raw_pairing、add_text（放开）、pause/resume_job、list_tags、generate_previews；search_assets 补 asset_type/extension/shutter/people/person_id/annotated/geo(bbox|near) 过滤，compactAsset 补 asset_type/duration/has_face/missing_original/source_changed；crop_assets 增任意矩形+旋转/翻转（sharp process-and-save）。Phase 2（同日）：渲染桥（agent → 渲染进程 canvas，electron/agentBridge.js + src/agent/renderBridge.js）+ render_collage / edit_asset / apply_frame / get_editor_capabilities，show_in_app 支持 view 参数——34 tools。
@@ -121,7 +127,8 @@
 | `get_selection()` | 主进程 ↔ renderer IPC | 2 |
 | `import_directory(path, opts)` | run-import-job（封装轮询） | 2 |
 | `annotate_assets(ids \| filter)` | annotation job | 2 |
-| `update_assets(ids, {tags, star, annotation})` | 元数据批量写 | 2 |
+| `update_assets(ids, {tags, star, annotation})` | 元数据批量写；`add_tags` 的新标签按词表落组，`tag_group` 指定组 | 2 |
+| `list_tags(group?, query?, limit?)` / `manage_tags(action, …)` | 标签按组列出；组与标签的管理（移组 / 改名 / 合并 / 删除 / 置顶） | 2 |
 | `manage_collection(action, ...)` | collection CRUD + 增删条目 | 2 |
 | `crop_assets(ids, ratio, gravity)` | 新增 create-derived | 3 |
 | `export_assets(ids \| collection, dir, opts)` | 待定（可能新增） | 3 |

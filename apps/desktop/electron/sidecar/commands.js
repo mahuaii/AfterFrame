@@ -8,9 +8,11 @@
 
 // argv for the view a facet query is counted inside; shared by facet-values
 // and search-facet so the two can never disagree about it.
-function facetViewArgv({ collectionId, status, search, filters, base } = {}) {
+// `includeDescendants`: inside a folder, read the folders under it too.
+function facetViewArgv({ collectionId, includeDescendants, status, search, filters, base } = {}) {
   const argv = [];
   if (collectionId) argv.push("--collection-id", String(collectionId));
+  if (collectionId && includeDescendants) argv.push("--include-descendants");
   if (status) argv.push("--status", String(status));
   if (search) argv.push("--search", String(search));
   if (filters && Object.keys(filters).length) argv.push("--filters", JSON.stringify(filters));
@@ -25,9 +27,10 @@ function createSidecarCommands(callJson, callJsonOneShot = callJson) {
     // ── Browse / read ────────────────────────────────────────────────────
     // `base`: the rules of the smart collection being viewed — the set that
     // search and filters refine (db/browse.py _view_where).
-    locateImageAsset({ assetId, status = "all", collectionId, search, sort, filters, base } = {}) {
+    locateImageAsset({ assetId, status = "all", collectionId, includeDescendants, search, sort, filters, base } = {}) {
       const argv = ["locate-image-asset", "--asset-id", String(assetId), "--status", String(status)];
       if (collectionId) argv.push("--collection-id", String(collectionId));
+      if (collectionId && includeDescendants) argv.push("--include-descendants");
       if (search) argv.push("--search", String(search));
       if (sort) argv.push("--sort", String(sort));
       if (filters && Object.keys(filters).length) argv.push("--filters", JSON.stringify(filters));
@@ -49,13 +52,26 @@ function createSidecarCommands(callJson, callJsonOneShot = callJson) {
       return callJson(argv).then((rows) => rows || []);
     },
 
+    // Find by list: each keyword looked up by file name inside one place (a
+    // status, a smart collection's `base`, or a folder); db/browse.py
+    // find_by_keywords. One JSON argument: a client's list runs to hundreds.
+    findByKeywords({ keywords = [], status = "all", collectionId, includeDescendants, base } = {}) {
+      const argv = ["find-by-keywords", "--keywords", JSON.stringify(keywords.map(String))];
+      if (collectionId) argv.push("--collection-id", String(collectionId));
+      else argv.push("--status", String(status));
+      if (collectionId && includeDescendants) argv.push("--include-descendants");
+      if (base && !collectionId) argv.push("--base", JSON.stringify(base));
+      return callJson(argv);
+    },
+
     // Lightweight location points for the map. Mirrors the gallery scope
     // (status/collection/search/facets); the sidecar ignores filters.geo so
     // the map keeps showing clusters outside the current viewport.
-    browseMapPoints({ status = "all", collectionId, search, filters, base, minPrecision, limit = 100000 } = {}) {
+    browseMapPoints({ status = "all", collectionId, includeDescendants, search, filters, base, minPrecision, limit = 100000 } = {}) {
       const argv = ["browse-map-points", "--limit", String(limit)];
       if (collectionId) argv.push("--collection-id", String(collectionId));
       else argv.push("--status", String(status));
+      if (collectionId && includeDescendants) argv.push("--include-descendants");
       if (search) argv.push("--search", String(search));
       if (filters && Object.keys(filters).length) argv.push("--filters", JSON.stringify(filters));
       if (base && !collectionId) argv.push("--base", JSON.stringify(base));
@@ -94,13 +110,15 @@ function createSidecarCommands(callJson, callJsonOneShot = callJson) {
     },
 
     // A folder takes the same search text and facet filters the library does.
-    browseCollection(collectionId, { limit = 120, offset = 0, search, filters, sort } = {}) {
+    // `includeDescendants` reads the folders under it too, each photo once.
+    browseCollection(collectionId, { limit = 120, offset = 0, search, filters, sort, includeDescendants } = {}) {
       const argv = [
         "browse-collection",
         "--collection-id", String(collectionId),
         "--limit", String(limit),
         "--offset", String(offset),
       ];
+      if (includeDescendants) argv.push("--include-descendants");
       if (search) argv.push("--search", String(search));
       if (filters && Object.keys(filters).length) argv.push("--filters", JSON.stringify(filters));
       if (sort) argv.push("--sort", String(sort));
@@ -193,10 +211,12 @@ function createSidecarCommands(callJson, callJsonOneShot = callJson) {
       return callJson(["camera-makes"]).then((rows) => rows || []);
     },
 
-    searchFacet({ field, q = "", limit, ...view } = {}) {
+    // `group`: tags only — one tag group id, or "ungrouped".
+    searchFacet({ field, q = "", limit, group, ...view } = {}) {
       const argv = ["search-facet", "--field", String(field)];
       if (q) argv.push("--q", String(q));
       if (limit) argv.push("--limit", String(limit));
+      if (group) argv.push("--group", String(group));
       argv.push(...facetViewArgv(view));
       return callJson(argv).then((rows) => rows || []);
     },
@@ -292,15 +312,28 @@ function createSidecarCommands(callJson, callJsonOneShot = callJson) {
       return callJson(["list-collections"]).then((rows) => rows || []);
     },
 
-    reorderCollections(collectionIds) {
-      return callJson(["reorder-collections", ...collectionIds.flatMap((id) => ["--collection-id", String(id)])]);
+    // The order of one level: the folders directly under `parentId` (the top
+    // level when null).
+    reorderCollections(collectionIds, parentId = null) {
+      const argv = ["reorder-collections", ...collectionIds.flatMap((id) => ["--collection-id", String(id)])];
+      if (parentId) argv.push("--parent-id", String(parentId));
+      return callJson(argv);
     },
 
     // `rules` (smart collections only) is the saved browse destination:
-    // {status, search, filters, sort?}. The sidecar validates it.
-    createCollection(name, kind = "manual", rules = null) {
+    // {status, search, filters, sort?}. The sidecar validates it. `parentId`
+    // makes a folder inside another folder.
+    createCollection(name, kind = "manual", rules = null, parentId = null) {
       const argv = ["create-collection", "--name", String(name), "--kind", String(kind)];
       if (rules) argv.push("--rules-json", JSON.stringify(rules));
+      if (parentId) argv.push("--parent-id", String(parentId));
+      return callJson(argv);
+    },
+
+    // Put a folder inside another, or at the top level (parentId null).
+    moveCollection(collectionId, parentId = null) {
+      const argv = ["move-collection", "--collection-id", String(collectionId)];
+      if (parentId) argv.push("--parent-id", String(parentId));
       return callJson(argv);
     },
 
@@ -350,15 +383,34 @@ function createSidecarCommands(callJson, callJsonOneShot = callJson) {
       return callJson(argv);
     },
 
-    addAssetTags(assetIds, tags) {
+    // `group`: where a tag NEW to the library goes; an existing tag keeps its group.
+    addAssetTags(assetIds, tags, group) {
       const argv = ["add-asset-tags"];
+      for (const id of assetIds) argv.push("--asset-id", String(id));
+      for (const tag of tags) argv.push("--tag", String(tag));
+      if (group) argv.push("--group", String(group));
+      return callJson(argv);
+    },
+
+    addAssetTag(assetId, tag, group) {
+      const argv = ["add-asset-tag", "--asset-id", String(assetId), "--tag", String(tag)];
+      if (group) argv.push("--group", String(group));
+      return callJson(argv);
+    },
+
+    // Several photos, several tags off, one write (the batch "Remove Tags…").
+    removeAssetTags(assetIds, tags) {
+      const argv = ["remove-asset-tags"];
       for (const id of assetIds) argv.push("--asset-id", String(id));
       for (const tag of tags) argv.push("--tag", String(tag));
       return callJson(argv);
     },
 
-    addAssetTag(assetId, tag) {
-      return callJson(["add-asset-tag", "--asset-id", String(assetId), "--tag", String(tag)]);
+    // The tags on a set of photos with how many carry each: { tags: [{tag, count, group_id}] }.
+    listSelectionTags(assetIds) {
+      const argv = ["list-selection-tags"];
+      for (const id of assetIds) argv.push("--asset-id", String(id));
+      return callJson(argv).then((result) => result?.tags || []);
     },
 
     getAssetTags(assetId) {
@@ -369,10 +421,58 @@ function createSidecarCommands(callJson, callJsonOneShot = callJson) {
       return callJson(["remove-asset-tag", "--asset-id", String(assetId), "--tag", String(tag)]);
     },
 
-    listTags(limit) {
+    // The library's tags by group with use counts (db/tags.py list_tags_grouped):
+    // { count, groups: [{group_id, name, kind, ai_fill, tags: [{tag, count, pinned, aliases}]}], ungrouped: [...] }.
+    // `limit` caps each group's list; `query` narrows; `group` is one id or "ungrouped".
+    listTags({ limit, query, group } = {}) {
       const argv = ["list-tags"];
       if (limit) argv.push("--limit", String(limit));
-      return callJson(argv).then((rows) => rows || []);
+      if (query) argv.push("--query", String(query));
+      if (group) argv.push("--group", String(group));
+      return callJson(argv).then((result) => result || { count: 0, groups: [], ungrouped: [] });
+    },
+
+    listTagGroups() {
+      return callJson(["list-tag-groups"]).then((result) => result?.groups || []);
+    },
+
+    // action: create (name, aiFill) | rename (group, name) | delete (group) | ai-fill (group, aiFill).
+    manageTagGroups({ action, group, name, aiFill } = {}) {
+      const argv = ["manage-tag-groups", "--action", String(action)];
+      if (group) argv.push("--group", String(group));
+      if (name != null) argv.push("--name", String(name));
+      if (aiFill != null) argv.push("--ai-fill", aiFill ? "1" : "0");
+      return callJson(argv);
+    },
+
+    // Library-level tag edits; every photo carrying the tag follows.
+    setTagGroup(tags, group) {
+      const argv = ["set-tag-group"];
+      for (const tag of tags) argv.push("--tag", String(tag));
+      if (group) argv.push("--group", String(group));
+      return callJson(argv);
+    },
+
+    renameTag(tag, to) {
+      return callJson(["rename-tag", "--tag", String(tag), "--to", String(to)]);
+    },
+
+    mergeTags(tags, into) {
+      const argv = ["merge-tags", "--into", String(into)];
+      for (const tag of tags) argv.push("--tag", String(tag));
+      return callJson(argv);
+    },
+
+    deleteTag(tag) {
+      return callJson(["delete-tag", "--tag", String(tag)]);
+    },
+
+    pinTag(tag, pinned) {
+      return callJson(["pin-tag", "--tag", String(tag), "--pinned", pinned ? "1" : "0"]);
+    },
+
+    regroupTags() {
+      return callJson(["regroup-tags"]);
     },
 
     getAnnotation(assetId) {
@@ -445,12 +545,13 @@ function createSidecarCommands(callJson, callJsonOneShot = callJson) {
     },
 
     // How many assets a batch annotation would touch, before starting it.
-    annotationCount({ onlyMissing = true, assetIds, collectionId } = {}) {
+    annotationCount({ onlyMissing = true, assetIds, collectionId, includeDescendants } = {}) {
       const argv = ["annotation-count"];
       if (onlyMissing === false) argv.push("--reannotate");
       const ids = Array.isArray(assetIds) ? assetIds.filter(Boolean) : [];
       if (ids.length) argv.push("--asset-ids", ids.join(","));
       if (collectionId) argv.push("--collection-id", String(collectionId));
+      if (collectionId && includeDescendants) argv.push("--include-descendants");
       return callJson(argv).then((res) => res || { count: 0 });
     },
 

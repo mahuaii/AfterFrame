@@ -13,7 +13,10 @@ Semantics, the usual ones for faceted search:
     drone). A facet's value may be a scalar or a list; a scalar is a list of
     one, so filters saved before multi-select read unchanged;
   - tags are the one facet where "all of these" is as natural as "any of
-    these" (night AND neon), so `tag_match: "all"` switches it;
+    these" (night AND neon), so `tag_match: "all"` switches it, and
+    `tag_match: "by_group"` makes tags of one group alternatives while the
+    groups stack ((sunny OR cloudy) AND street); `tag_group` asks for any
+    tag of a group at all;
   - `exclude` lists facets whose sense is flipped: "not this camera", "none of
     these tags", "not in this folder". The facet keeps its values;
   - `any_of` is a list of groups, each an ordinary filter dict: a photo must
@@ -29,6 +32,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from .. import formats
+from .collection_scope import subtree_members_subquery
 
 Clause = tuple[str, list[object]]
 
@@ -240,11 +244,45 @@ def _tag(filters: dict) -> list[Clause]:
     if not values:
         return []
     exists = "EXISTS (SELECT 1 FROM asset_tags t WHERE t.asset_id = assets.asset_id AND {cond})"
-    if filters.get("tag_match") == "all":
+    match = filters.get("tag_match")
+    if match == "all":
         # Every tag must be present: one EXISTS per tag, AND-combined.
         return [(exists.format(cond="t.tag = ?"), [value]) for value in values]
+    if match == "by_group":
+        # Tags of one group are alternatives (sunny OR cloudy); groups stack
+        # (AND street). An ungrouped tag is a condition of its own. The
+        # grouping is read from `tags` at query time: one EXISTS per bucket.
+        return _tag_buckets(values)
     cond, params = _in("t.tag", values)
     return [(exists.format(cond=cond), params)]
+
+
+def _tag_buckets(values: Sequence[object]) -> list[Clause]:
+    """`by_group`: for every picked tag, the photo must carry SOME picked tag
+    of the same bucket (its tags.group_id, or itself when ungrouped). Tags of
+    one bucket produce identical clauses, which AND together harmlessly, so
+    the buckets need not be known here: no connection, like every facet."""
+    picked = ", ".join("?" for _ in values)
+    clause = (
+        "EXISTS (SELECT 1 FROM asset_tags t LEFT JOIN tags tg ON tg.tag = t.tag "
+        f"WHERE t.asset_id = assets.asset_id AND t.tag IN ({picked}) "
+        "AND COALESCE(tg.group_id, 'tag:' || t.tag) = "
+        "COALESCE((SELECT pg.group_id FROM tags pg WHERE pg.tag = ?), 'tag:' || ?))"
+    )
+    return [(clause, [*values, value, value]) for value in values]
+
+
+def _tag_group(filters: dict) -> list[Clause]:
+    """Photos with at least one tag in the group(s); `exclude` makes it none."""
+    values = [str(v) for v in _values(filters.get("tag_group"))]
+    if not values:
+        return []
+    cond, params = _in("tags.group_id", values)
+    return [(
+        "EXISTS (SELECT 1 FROM asset_tags t JOIN tags ON tags.tag = t.tag "
+        f"WHERE t.asset_id = assets.asset_id AND {cond})",
+        params,
+    )]
 
 
 def _people(filters: dict) -> list[Clause]:
@@ -263,6 +301,39 @@ def _annotated(filters: dict) -> list[Clause]:
     if filters.get("annotated") == "without":
         return [(f"NOT {annotation}", [])]
     return []
+
+
+# A photo with its RAW file bound to it (the pairing the import makes, or
+# one confirmed by hand). The sidebar used to offer this as a place of its own
+# ("With Raw", status "matched"); now it is a condition like any other.
+_HAS_RAW = (
+    "EXISTS (SELECT 1 FROM image_lookup_registry AS reg WHERE reg.image_asset_id = assets.asset_id"
+    " AND reg.match_status IN ('auto_bound', 'manual_confirmed'))"
+)
+_TRUE_WORDS = {"true", "yes", "1", "with"}
+_FALSE_WORDS = {"false", "no", "0", "without"}
+
+
+def has_raw_value(raw: object) -> bool | None:
+    """The facet's value as a bool: true / false, 1 / 0, "yes" / "no", "with" / "without"; anything else is no condition."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    word = str(raw).strip().lower()
+    if word in _TRUE_WORDS:
+        return True
+    if word in _FALSE_WORDS:
+        return False
+    return None
+
+
+def _has_raw(filters: dict) -> list[Clause]:
+    values = _values(filters.get("has_raw"))
+    wanted = {has_raw_value(value) for value in values} - {None}
+    if len(wanted) != 1:  # none given, or both: no condition
+        return []
+    return [(_HAS_RAW if True in wanted else f"NOT {_HAS_RAW}", [])]
 
 
 def _person_group(filters: dict) -> list[Clause]:
@@ -288,10 +359,14 @@ def _person_group(filters: dict) -> list[Clause]:
 
 def _in_collection(filters: dict) -> list[Clause]:
     # Membership of a folder as a condition, so a smart collection can be saved
-    # from inside one ("the five-star photos of this trip").
+    # from inside one ("the five-star photos of this trip"). With
+    # in_collection_descendants the folders under it count too, as the
+    # folder's own view does when it shows its subfolders.
     values = _values(filters.get("in_collection"))
     if not values:
         return []
+    if filters.get("in_collection_descendants") in (True, 1, "1", "true"):
+        return [subtree_members_subquery([str(value) for value in values])]
     cond, params = _in("collection_id", values)
     return [(f"assets.asset_id IN (SELECT asset_id FROM collection_items WHERE {cond})", params)]
 
@@ -379,6 +454,34 @@ def _contains_facet(name: str, expr: str) -> Facet:
     return Facet(name, (name,), clauses)
 
 
+# A client's picks, as "Find by List…" reads them: more keywords than this is
+# not a list of picks, and each one costs two LIKEs a row.
+NAME_KEYWORD_LIMIT = 500
+
+
+def _name_contains(filters: dict) -> list[Clause]:
+    """Photos whose file name holds any of these keywords: the photo's own
+    name, or its RAW's ("1723" finds B0001723.3FR and the JPEG paired with
+    it). The name only — not the folders on disk, as path_contains reads.
+    The same match browse.find_by_keywords counts per keyword."""
+    seen: dict[str, str] = {}
+    for value in _values(filters.get("name_contains")):
+        text = str(value).strip()
+        if text:
+            seen.setdefault(text.casefold(), text)
+    keywords = list(seen.values())[:NAME_KEYWORD_LIMIT]
+    if not keywords:
+        return []
+    patterns = ["%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" for text in keywords]
+    own = " OR ".join("assets.stem LIKE ? ESCAPE '\\'" for _ in patterns)
+    raw = " OR ".join("raw.stem LIKE ? ESCAPE '\\'" for _ in patterns)
+    return [(
+        f"(({own}) OR EXISTS (SELECT 1 FROM image_lookup_registry reg JOIN assets raw ON raw.asset_id = reg.raw_asset_id "
+        f"WHERE reg.image_asset_id = assets.asset_id AND ({raw})))",
+        [*patterns, *patterns],
+    )]
+
+
 def _geo(filters: dict) -> list[Clause]:
     clause = _geo_filter_clause(filters.get("geo"))
     return [clause] if clause is not None else []
@@ -397,9 +500,11 @@ FACETS: tuple[Facet, ...] = (
     Facet("orientation", ("orientation",), _orientation),
     Facet("asset_type", ("asset_type",), _asset_type),
     Facet("tag", ("tag", "tag_match"), _tag, modifiers=("tag_match",)),
+    Facet("tag_group", ("tag_group",), _tag_group),
     Facet("extension", ("extension",), _extension),
     Facet("people", ("people",), _people),
     Facet("annotated", ("annotated",), _annotated),
+    Facet("has_raw", ("has_raw",), _has_raw),
     Facet("person_group", ("person_group",), _person_group),
     Facet("location_source", ("location_source",), _location_source),
     _place_facet("country", "country_code", upper=True),
@@ -409,8 +514,9 @@ FACETS: tuple[Facet, ...] = (
     _contains_facet("caption_contains", "CASE WHEN assets.user_description IS NOT NULL THEN assets.user_description ELSE (SELECT ann.caption FROM asset_ai_annotations ann WHERE ann.asset_id = assets.asset_id) END"),
     _contains_facet("ocr_contains", "(SELECT ann.detected_text FROM asset_ai_annotations ann WHERE ann.asset_id = assets.asset_id)"),
     _contains_facet("path_contains", "(SELECT reg.image_path FROM image_lookup_registry reg WHERE reg.image_asset_id = assets.asset_id LIMIT 1)"),
+    Facet("name_contains", ("name_contains",), _name_contains),
     Facet("geo", ("geo",), _geo),
-    Facet("in_collection", ("in_collection",), _in_collection),
+    Facet("in_collection", ("in_collection", "in_collection_descendants"), _in_collection, modifiers=("in_collection_descendants",)),
 )
 
 FACET_NAMES = frozenset(facet.name for facet in FACETS)

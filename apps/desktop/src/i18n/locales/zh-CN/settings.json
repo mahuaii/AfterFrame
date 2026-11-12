@@ -377,11 +377,15 @@
       },
       "photo": {
         "addTags": "添加标签…",
+        "removeTags": "移除标签…",
         "edit": "编辑",
         "compare": "对比两张照片",
         "reveal": "在访达中显示",
         "delete": "从图库移除",
         "deleteRejected": "删除排除的照片…"
+      },
+      "folder": {
+        "addToTarget": "加入目标文件夹"
       },
       "select": {
         "all": "全选",

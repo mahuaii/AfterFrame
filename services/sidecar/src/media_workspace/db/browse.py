@@ -5,13 +5,21 @@ Split from the monolithic db.py (review P3-5); one module per domain.
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
 
 # The facet filters (what the filter bar sends) live in facets.py: one registry
 # that the WHERE builder, the rules validation and the option counts all read.
 from .. import formats
-from .facets import _LOCATION_OWNER, LOCATION_SOURCES, _facet_clauses
+from .collection_scope import members_join, members_subquery, scope_collection_ids
+from .facets import _LOCATION_OWNER, LOCATION_SOURCES, _facet_clauses, _values
 from .facets import FACET_OWN_KEYS as _FACET_OWN_KEYS
+from .tags import list_tag_groups
+
+# How many of a group's tags the filter bar lists before "N more" (the rest
+# through search_facet_values with group=).
+TAGS_PER_GROUP = 12
 
 # What a row says about the photo itself — EXIF, rating, flag, shape, tags,
 # descriptions. The browse rows and the detail rows read it the same way.
@@ -186,10 +194,16 @@ def _search_clause(search: str | None) -> tuple[str, list[object]]:
         "OR assets.meta_camera_model LIKE ? OR assets.meta_lens_model LIKE ? "
         "OR assets.user_description LIKE ? "
         "OR anno.caption LIKE ? OR anno.detected_text LIKE ? "
-        "OR EXISTS (SELECT 1 FROM asset_tags st WHERE st.asset_id = assets.asset_id AND st.tag LIKE ?))"
+        "OR EXISTS (SELECT 1 FROM asset_tags st WHERE st.asset_id = assets.asset_id AND st.tag LIKE ?) "
+        # A tag's other spellings (the vocabulary's other language, a merged-away
+        # name): searching 日落 finds the photos tagged sunset.
+        "OR EXISTS (SELECT 1 FROM asset_tags st JOIN tag_aliases al ON al.tag = st.tag "
+        "WHERE st.asset_id = assets.asset_id AND al.alias LIKE ?))"
     )
     like_pattern = f"%{search}%"
-    return clause, [like_pattern] * 8
+    params: list[object] = [like_pattern] * 8
+    params.append(f"%{search.lower()}%")
+    return clause, params
 
 
 def _view_where(
@@ -276,19 +290,18 @@ def count_image_assets(
 def locate_image_asset(connection: sqlite3.Connection, asset_id: str, *,
                        status: str = "all", search: str | None = None,
                        sort: str | None = None, filters: dict | None = None,
-                       collection_id: str | None = None, base: dict | None = None) -> int | None:
+                       collection_id: str | None = None, base: dict | None = None,
+                       include_descendants: bool = False) -> int | None:
     """Zero-based gallery position, without hydrating metadata or statting files."""
     if collection_id:
         # A folder narrows by membership; search and facets narrow it further,
         # exactly as browse_collection does, in the same order.
-        joins = (
-            "JOIN collection_items ci ON ci.asset_id = assets.asset_id "
-            "LEFT JOIN asset_ai_annotations AS anno ON anno.asset_id = assets.asset_id"
-        )
+        members_sql, members_params = members_join(scope_collection_ids(connection, collection_id, include_descendants))
+        joins = f"{members_sql} LEFT JOIN asset_ai_annotations AS anno ON anno.asset_id = assets.asset_id"
         search_clause, search_params = _search_clause(search)
         facet_clause, facet_params = _facet_clauses(filters)
-        where = f"ci.collection_id = ? AND assets.asset_type IN ('image', 'video', 'raw') {search_clause} {facet_clause}"
-        params: list[object] = [collection_id, *search_params, *facet_params]
+        where = f"assets.asset_type IN ('image', 'video', 'raw') {search_clause} {facet_clause}"
+        params: list[object] = [*members_params, *search_params, *facet_params]
         order = _collection_order_clause(sort)
     else:
         joins = "LEFT JOIN asset_ai_annotations AS anno ON anno.asset_id = assets.asset_id"
@@ -304,6 +317,92 @@ def locate_image_asset(connection: sqlite3.Connection, asset_id: str, *,
         ) WHERE asset_id = ?
     """, [*params, asset_id]).fetchone()
     return row[0] if row else None
+
+
+# ── find by list ────────────────────────────────────────────────────────────
+# A client picks from the JPEGs they were sent and answers with numbers:
+# "1723, 1746, 1754" for B0001723.3FR and its neighbours. Each keyword is
+# looked up on its own, so the dialog can say which one found nothing (a typo)
+# and which found several.
+#
+# How many photos one keyword may name. Past this it is not a pick but a
+# stray number ("12" out of "12 photos in total"): the count still comes back,
+# with the first matches, and the dialog leaves that keyword out.
+FIND_MATCH_LIMIT = 50
+FIND_KEYWORD_LIMIT = 500
+
+
+def find_by_keywords(
+    connection: sqlite3.Connection,
+    keywords: list[str],
+    *,
+    status: str = "all",
+    collection_id: str | None = None,
+    include_descendants: bool = False,
+    base: dict | None = None,
+) -> dict:
+    """Per keyword, the photos whose file name contains it, inside one place:
+    a status view, a smart collection (`base`) or a folder. The place only —
+    the search box and the filter bar do not narrow it. A keyword matches the
+    photo's own file name or its RAW's, case-insensitively, as the search box
+    matches a name; nothing else (a caption or a folder on disk holding the
+    same digits is not what the client meant)."""
+    needles: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for keyword in keywords:
+        text = str(keyword or "").strip()
+        folded = text.casefold()
+        if not folded or folded in seen:
+            continue
+        seen.add(folded)
+        needles.append((text, folded))
+    needles = needles[:FIND_KEYWORD_LIMIT]
+    found: list[dict] = [{"keyword": text, "count": 0, "matches": []} for text, _ in needles]
+    if not needles:
+        return {"limit": FIND_MATCH_LIMIT, "keywords": found}
+
+    if collection_id:
+        members_sql, params = members_join(scope_collection_ids(connection, collection_id, include_descendants))
+        source = f"""
+            FROM assets
+            {members_sql}
+            JOIN image_lookup_registry AS registry ON registry.image_asset_id = assets.asset_id
+            LEFT JOIN assets AS raw_assets ON raw_assets.asset_id = registry.raw_asset_id
+            WHERE assets.asset_type IN ('image', 'video', 'raw')"""
+    else:
+        where, params = _view_where(status, None, None, base)
+        source = f"""
+            FROM image_lookup_registry AS registry
+            JOIN assets ON assets.asset_id = registry.image_asset_id
+            LEFT JOIN assets AS raw_assets ON raw_assets.asset_id = registry.raw_asset_id
+            LEFT JOIN asset_ai_annotations AS anno ON anno.asset_id = assets.asset_id
+            WHERE {where}"""
+    rows = connection.execute(
+        f"""
+        SELECT assets.asset_id, assets.stem, registry.image_path, raw_assets.stem AS raw_stem
+        {source}
+        ORDER BY assets.stem, assets.asset_id
+        """,
+        params,
+    ).fetchall()
+
+    # One pass over the place's names. Most hold none of the keywords, and the
+    # alternation says so without asking each keyword in turn.
+    any_keyword = re.compile("|".join(re.escape(folded) for _, folded in needles))
+    for row in rows:
+        names = f"{row['stem'] or ''}\n{row['raw_stem'] or ''}".casefold()
+        if not any_keyword.search(names):
+            continue
+        for entry, (_, folded) in zip(found, needles, strict=True):
+            if folded not in names:
+                continue
+            entry["count"] += 1
+            if len(entry["matches"]) < FIND_MATCH_LIMIT:
+                entry["matches"].append({
+                    "asset_id": row["asset_id"],
+                    "file_name": os.path.basename(row["image_path"] or "") or row["stem"],
+                })
+    return {"limit": FIND_MATCH_LIMIT, "keywords": found}
 
 
 # ── facet options (the filter bar's dropdowns and sliders) ──────────────────
@@ -330,16 +429,19 @@ def _facet_scope(
     search: str | None,
     filters: dict | None,
     base: dict | None = None,
+    collection_ids: list[str] | None = None,
 ) -> tuple[str, list[object]]:
-    """WHERE (without the keyword) + params for counting one facet's options."""
+    """WHERE (without the keyword) + params for counting one facet's options.
+    `collection_ids` is the folder scope already resolved (the folder alone,
+    or with the folders under it); `collection_id` alone means that folder."""
     own = _FACET_OWN_KEYS[facet]
     others = {k: v for k, v in (filters or {}).items() if k not in own}
     if collection_id:
         # A folder replaces the status, exactly as browse_collection does.
         search_clause, search_params = _search_clause(search)
         facet_clause, facet_params = _facet_clauses(others)
-        where = "assets.asset_id IN (SELECT asset_id FROM collection_items WHERE collection_id = ?)"
-        return f"{where} {search_clause} {facet_clause}", [collection_id, *search_params, *facet_params]
+        where, where_params = members_subquery(collection_ids or [collection_id])
+        return f"{where} {search_clause} {facet_clause}", [*where_params, *search_params, *facet_params]
     # A smart collection's rules are the base set, never dropped as "own keys":
     # inside "PNG screenshots", JPG must honestly count 0.
     return _view_where(status or "all", search, others, base)
@@ -353,6 +455,7 @@ def get_facet_values(
     search: str | None = None,
     filters: dict | None = None,
     base: dict | None = None,
+    include_descendants: bool = False,
 ) -> dict[str, object]:
     """Options for the filter bar: distinct cameras / lenses / tags / formats
     with counts, numeric ranges for the sliders, and the capture-time span.
@@ -362,8 +465,11 @@ def get_facet_values(
     reverse-lookup source does not. With no arguments this describes the whole
     library, which is what get_catalog_info reports to agents.
     """
+    collection_ids = scope_collection_ids(connection, collection_id, include_descendants) if collection_id else None
+
     def scope_for(facet: str) -> tuple[str, list[object]]:
-        return _facet_scope(facet, collection_id=collection_id, status=status, search=search, filters=filters, base=base)
+        return _facet_scope(facet, collection_id=collection_id, status=status, search=search, filters=filters, base=base,
+                            collection_ids=collection_ids)
 
     def value_counts(facet: str, expr: str, order: str = "c DESC") -> list[dict[str, object]]:
         where, params = scope_for(facet)
@@ -383,24 +489,60 @@ def get_facet_values(
         ).fetchone()
         return {"min": r["lo"], "max": r["hi"]}
 
-    # Only the most-used tags for the default dropdown; the rest are reachable
-    # via server-side search (search_facet_values) so this stays bounded even
-    # with thousands of tags.
+    # Tags by group: each group's most-used (pinned first), the rest reachable
+    # through search_facet_values; a picked tag is always listed, so the row
+    # to untick is there even when it has run out. Groups also say how many
+    # photos in view carry any tag of theirs (the "any in group" option).
     tag_where, tag_params = scope_for("tag")
     tag_rows = connection.execute(
         f"""
-        SELECT t.tag AS v, COUNT(*) AS c
+        SELECT t.tag AS v, COUNT(*) AS c, tg.group_id AS group_id, COALESCE(tg.pinned, 0) AS pinned
         FROM asset_tags AS t
         JOIN image_lookup_registry AS registry ON registry.image_asset_id = t.asset_id
         JOIN assets ON assets.asset_id = registry.image_asset_id
         LEFT JOIN asset_ai_annotations AS anno ON anno.asset_id = assets.asset_id
+        LEFT JOIN tags AS tg ON tg.tag = t.tag
         WHERE {tag_where}
         GROUP BY t.tag
-        ORDER BY c DESC, t.tag
-        LIMIT 60
+        ORDER BY pinned DESC, c DESC, t.tag
         """,
         tag_params,
     ).fetchall()
+    picked_tags = {str(v) for v in _values((filters or {}).get("tag"))}
+    tags_by_group: dict[str | None, list[dict[str, object]]] = {}
+    group_tag_totals: dict[str | None, int] = {}
+    for row in tag_rows:
+        bucket = tags_by_group.setdefault(row["group_id"], [])
+        group_tag_totals[row["group_id"]] = group_tag_totals.get(row["group_id"], 0) + 1
+        if len(bucket) < TAGS_PER_GROUP or row["v"] in picked_tags or row["pinned"]:
+            bucket.append({"value": row["v"], "count": row["c"], "group_id": row["group_id"], "pinned": bool(row["pinned"])})
+    group_where, group_params = scope_for("tag_group")
+    group_asset_counts = {
+        row["group_id"]: row["c"]
+        for row in connection.execute(
+            f"""
+            SELECT tg.group_id AS group_id, COUNT(DISTINCT t.asset_id) AS c
+            FROM asset_tags AS t
+            JOIN tags AS tg ON tg.tag = t.tag
+            JOIN image_lookup_registry AS registry ON registry.image_asset_id = t.asset_id
+            JOIN assets ON assets.asset_id = registry.image_asset_id
+            LEFT JOIN asset_ai_annotations AS anno ON anno.asset_id = assets.asset_id
+            WHERE {group_where} AND tg.group_id IS NOT NULL
+            GROUP BY tg.group_id
+            """,
+            group_params,
+        ).fetchall()
+    }
+    tag_group_options = [
+        {
+            **group,
+            "asset_count": group_asset_counts.get(group["group_id"], 0),
+            "shown_count": group_tag_totals.get(group["group_id"], 0),
+        }
+        for group in list_tag_groups(connection)
+    ]
+    tag_options = [entry for group in tag_group_options for entry in tags_by_group.get(group["group_id"], [])]
+    tag_options += tags_by_group.get(None, [])
 
     # What each photo's location is based on, including "none" — counted over
     # the effective location (the paired RAW's first), like the filter itself.
@@ -429,8 +571,24 @@ def get_facet_values(
         country_params,
     ).fetchall()
 
+    # With / without a bound RAW file; only once the catalog has any RAW
+    # pairing, so a JPEG-only library never sees the option.
+    raw_where, raw_params = scope_for("has_raw")
+    raw_rows = connection.execute(
+        f"""
+        SELECT CASE WHEN registry.match_status IN ('auto_bound', 'manual_confirmed') THEN 'true' ELSE 'false' END AS v,
+               COUNT(*) AS c
+        {_FACET_FROM}
+        WHERE {raw_where}
+        GROUP BY v
+        """,
+        raw_params,
+    ).fetchall()
+    raw_counts = {r["v"]: r["c"] for r in raw_rows}
+
     return {
         "location_sources": [{"value": v, "count": source_counts[v]} for v in LOCATION_SOURCES if source_counts.get(v)],
+        "has_raw": [{"value": v, "count": raw_counts[v]} for v in ("true", "false") if raw_counts.get(v)] if raw_counts.get("true") else [],
         "countries": [_country_option(r["v"], r["c"]) for r in country_rows],
         # The colour filter takes any colour, so it has no options to count;
         # the bar only needs to know whether any photo has colours yet.
@@ -439,7 +597,11 @@ def get_facet_values(
         "cities": _city_options(connection, *scope_for("city"), like="%", limit=60),
         "cameras": value_counts("camera", "assets.meta_camera_model"),
         "lenses": value_counts("lens", "assets.meta_lens_model"),
-        "tags": [{"value": r["v"], "count": r["c"]} for r in tag_rows],
+        "tags": tag_options,
+        # The groups in display order, each with the photos in view that carry
+        # any of its tags and how many distinct tags of it are in view.
+        "tag_groups": tag_group_options,
+        "ungrouped_tag_count": group_tag_totals.get(None, 0),
         # By format family (jpeg, heif, png, mp4, cr3, …): .jpg and .jpeg are
         # one JPEG, .heic and .hif one HEIF. `label` is what to show.
         "extensions": [
@@ -492,31 +654,47 @@ def search_facet_values(
     search: str | None = None,
     filters: dict | None = None,
     base: dict | None = None,
+    group: str | None = None,
+    include_descendants: bool = False,
 ) -> list[dict[str, object]]:
     """Server-side facet search, so a dropdown never loads more than `limit`
     rows regardless of how many distinct values exist. Matches substring,
-    ordered by frequency, counted inside the same view as get_facet_values."""
+    ordered by frequency, counted inside the same view as get_facet_values.
+    For tags, `group` narrows to one group id ("ungrouped" for none) and a
+    tag's other spellings match too."""
     if field not in ("tag", "camera", "lens", "city"):
         return []
     like = f"%{q}%" if q else "%"
-    where, params = _facet_scope(field, collection_id=collection_id, status=status, search=search, filters=filters, base=base)
+    collection_ids = scope_collection_ids(connection, collection_id, include_descendants) if collection_id else None
+    where, params = _facet_scope(field, collection_id=collection_id, status=status, search=search, filters=filters, base=base,
+                                 collection_ids=collection_ids)
     if field == "city":
         return _city_options(connection, where, params, like=like, limit=limit)
     if field == "tag":
+        group_clause = ""
+        group_params: list[object] = []
+        if group == "ungrouped":
+            group_clause = "AND tg.group_id IS NULL"
+        elif group:
+            group_clause = "AND tg.group_id = ?"
+            group_params.append(group)
         rows = connection.execute(
             f"""
-            SELECT t.tag AS v, COUNT(*) AS c
+            SELECT t.tag AS v, COUNT(*) AS c, tg.group_id AS group_id, COALESCE(tg.pinned, 0) AS pinned
             FROM asset_tags AS t
             JOIN image_lookup_registry AS registry ON registry.image_asset_id = t.asset_id
             JOIN assets ON assets.asset_id = registry.image_asset_id
             LEFT JOIN asset_ai_annotations AS anno ON anno.asset_id = assets.asset_id
-            WHERE {where} AND t.tag LIKE ?
+            LEFT JOIN tags AS tg ON tg.tag = t.tag
+            WHERE {where} {group_clause}
+              AND (t.tag LIKE ? OR EXISTS (SELECT 1 FROM tag_aliases al WHERE al.tag = t.tag AND al.alias LIKE ?))
             GROUP BY t.tag
-            ORDER BY c DESC, t.tag
+            ORDER BY pinned DESC, c DESC, t.tag
             LIMIT ?
             """,
-            [*params, like, limit],
+            [*params, *group_params, like, like.lower(), limit],
         ).fetchall()
+        return [{"value": r["v"], "count": r["c"], "group_id": r["group_id"], "pinned": bool(r["pinned"])} for r in rows]
     else:
         col = "meta_camera_model" if field == "camera" else "meta_lens_model"
         rows = connection.execute(
@@ -655,29 +833,31 @@ def browse_collection(
     search: str | None = None,
     filters: dict | None = None,
     sort: str | None = None,
+    include_descendants: bool = False,
 ) -> list[sqlite3.Row]:
     """A folder's photos, narrowed by the same search text and facet filters
     the library view takes, in the toolbar's sort order. No sort (or
-    "added-desc") keeps the folder's own order: most recently added first."""
+    "added-desc") keeps the folder's own order: most recently added first.
+    `include_descendants` reads the folders under it too, each photo once."""
+    members_sql, members_params = members_join(scope_collection_ids(connection, collection_id, include_descendants))
     search_clause, search_params = _search_clause(search)
     facet_clause, facet_params = _facet_clauses(filters)
     return connection.execute(
         f"""
         SELECT
 {_BROWSE_SELECT_COLUMNS}
-        FROM collection_items ci
-        JOIN assets ON assets.asset_id = ci.asset_id
+        FROM assets
+        {members_sql}
         JOIN image_lookup_registry AS registry
             ON registry.image_asset_id = assets.asset_id
 {_BROWSE_SHARED_JOINS}
-        WHERE ci.collection_id = ?
-          AND assets.asset_type IN ('image', 'video', 'raw')
+        WHERE assets.asset_type IN ('image', 'video', 'raw')
           {search_clause}
           {facet_clause}
         ORDER BY {_collection_order_clause(sort)}
         LIMIT ? OFFSET ?
         """,
-        [collection_id, *search_params, *facet_params, limit, offset],
+        [*members_params, *search_params, *facet_params, limit, offset],
     ).fetchall()
 
 

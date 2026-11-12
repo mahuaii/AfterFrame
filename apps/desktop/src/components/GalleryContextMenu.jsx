@@ -10,6 +10,7 @@ import { Z } from "../ui";
 import useDismiss from "../ui/useDismiss";
 import { LOCKED_HINT_KEY } from "./DesktopOnly";
 import { formatKeys, shortcutLabel } from "../shortcuts/store";
+import { flattenForPicker } from "./folderTree";
 
 function MenuItem({ icon: Icon, label, shortcut, onClick, locked = false, children }) {
   const { t: tc } = useTranslation("common");
@@ -88,8 +89,8 @@ function SubMenuItem({ icon: Icon, label, shortcut, onClick, ...rest }) {
   );
 }
 
-export default function ContextMenu({ x, y, item, assetIds, collections, activeCollectionId, editors, onAddTo, onRemoveFrom, onReveal, onShowInAllAssets, onFindSimilar, onRefreshFromDisk, onEdit, onOpenWith, onDeleteFromCatalog, onDeleteFromDisk, onCopy, onCopyPath, onCopyName, onCompare, onCollage, onAnnotate, onFlag, onAddTags, onClose }) {
-  const { t } = useTranslation("nav");
+export default function ContextMenu({ x, y, item, assetIds, collections, activeCollectionId, targetFolderId = null, editors, onAddTo, onRemoveFrom, onReveal, onShowInAllAssets, onFindSimilar, onRefreshFromDisk, onEdit, onOpenWith, onDeleteFromCatalog, onDeleteFromDisk, onCopy, onCopyPath, onCopyName, onCompare, onCollage, onAnnotate, onFlag, onAddTags, onRemoveTags, onClose }) {
+  const { t, i18n } = useTranslation("nav");
   const ref = useRef(null);
   useDismiss(ref, onClose);
 
@@ -105,7 +106,11 @@ export default function ContextMenu({ x, y, item, assetIds, collections, activeC
     setPos({ x: nx, y: ny });
   }, [x, y]);
 
-  const manualFolders = (collections || []).filter((c) => c.kind === "manual");
+  // Folders nest: depth-first, each indented by its depth.
+  const manualFolders = flattenForPicker(collections, { locale: i18n.language });
+  // The target folder (the B key's) leads the list, with its key.
+  const targetFolder = manualFolders.find(({ folder }) => folder.collection_id === targetFolderId)?.folder || null;
+  const otherFolders = targetFolder ? manualFolders.filter(({ folder }) => folder !== targetFolder) : manualFolders;
   const inActiveFolder = !!activeCollectionId;
 
   return createPortal(
@@ -124,6 +129,9 @@ export default function ContextMenu({ x, y, item, assetIds, collections, activeC
       )}
       {onAddTags && (
         <MenuItem icon={Tag} label={t("gallery.menu.addTags", { count: assetIds?.length || 1 })} shortcut={shortcutLabel("photo.addTags")} onClick={() => { onAddTags(); onClose(); }} />
+      )}
+      {onRemoveTags && (
+        <MenuItem icon={Tag} label={t("gallery.menu.removeTags", { count: assetIds?.length || 1 })} shortcut={shortcutLabel("photo.removeTags")} onClick={() => { onRemoveTags(); onClose(); }} />
       )}
       {onShowInAllAssets && (
         <MenuItem icon={LocateFixed} label={t("gallery.menu.showInAllAssets")} onClick={() => { onShowInAllAssets(item.asset_id); onClose(); }} />
@@ -188,17 +196,35 @@ export default function ContextMenu({ x, y, item, assetIds, collections, activeC
 
       {manualFolders.length > 0 && (
         <MenuItem icon={FolderPlus} label={t("gallery.menu.addToFolder")}>
-          {manualFolders.map((col) => (
+          {targetFolder && (
             <button
-              key={col.collection_id}
               type="button"
-              className="flex w-full cursor-pointer rounded-md items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-muted hover:bg-hover hover:text-text"
-              onClick={() => { onAddTo(col.collection_id); onClose(); }}
+              data-target-folder="true"
+              className="flex w-full cursor-pointer items-center gap-2.5 rounded-md px-3 py-1.5 text-left text-[12px] text-muted hover:bg-hover hover:text-text"
+              onClick={() => { onAddTo(targetFolder.collection_id); onClose(); }}
             >
-              <Folder className="h-3.5 w-3.5" />
-              {col.name}
+              <Folder className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{targetFolder.name}</span>
+              {/* A visual hint only: the button's name stays the folder's. */}
+              <span className="text-[10px] text-muted2" aria-hidden="true">{shortcutLabel("folder.addToTarget")}</span>
             </button>
-          ))}
+          )}
+          {targetFolder && otherFolders.length > 0 && <div className="my-1 border-t border-border/40" />}
+          <div className="popover-scroll max-h-[min(60vh,420px)] overflow-y-auto">
+            {otherFolders.map(({ folder: col, depth }) => (
+              <button
+                key={col.collection_id}
+                type="button"
+                data-folder-depth={depth}
+                className="flex w-full cursor-pointer rounded-md items-center gap-2.5 py-1.5 pr-3 text-left text-[12px] text-muted hover:bg-hover hover:text-text"
+                style={{ paddingLeft: `${12 + depth * 14}px` }}
+                onClick={() => { onAddTo(col.collection_id); onClose(); }}
+              >
+                <Folder className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{col.name}</span>
+              </button>
+            ))}
+          </div>
         </MenuItem>
       )}
 

@@ -4,11 +4,12 @@ import { useTranslation } from "react-i18next";
 import { Check, Download, Loader2, X, ChevronDown, Folder, Images, LayoutGrid, ArrowUpDown, Search } from "lucide-react";
 import { browseCount, fileName, localFileUrl, pathSeparator } from "../utils/format";
 import CollageCanvas from "./collage/CollageCanvas";
+import { flattenForPicker } from "./folderTree";
 import CollagePanel from "./collage/CollagePanel";
 import BatchPanel from "./collage/BatchPanel";
 import { TemplateGrid } from "./collage/PanelControls";
 import { getTemplatesForCount } from "./collage/collageTemplates";
-import { computeGroups, orderImages, MAX_TEMPLATE_COUNT } from "./collage/collageBatch";
+import { computeGroups, orderImages, shuffleImages, MAX_TEMPLATE_COUNT } from "./collage/collageBatch";
 import { ensureHdInChunks, needsCollageHd } from "./collage/collageHd";
 import { hdPreviews } from "../hooks/useOnDemandHdPreviews";
 import { topLayerOpen } from "../utils/topLayer";
@@ -105,8 +106,9 @@ function ImagePickerModal({ excludeIds, collections, summary, onAdd, onClose, re
     return () => clearTimeout(timer);
   }, [searchInput]);
 
+  // Folders nest: depth-first with the depth, for the indented dropdown.
   const manualCollections = useMemo(
-    () => (collections || []).filter((c) => c.kind === "manual"),
+    () => flattenForPicker(collections).map(({ folder, depth }) => ({ ...folder, depth })),
     [collections],
   );
 
@@ -346,15 +348,16 @@ function ImagePickerModal({ excludeIds, collections, summary, onAdd, onClose, re
                       key={col.collection_id}
                       type="button"
                       className={cx(
-                        "flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] transition-colors",
+                        "flex w-full items-center gap-2.5 py-2 pr-3 text-left text-[12px] transition-colors",
                         source === col.collection_id
                           ? "bg-selected text-text"
                           : "text-muted hover:bg-hover hover:text-text",
                       )}
+                      style={{ paddingLeft: `${12 + (col.depth || 0) * 14}px` }}
                       onClick={() => { setSource(col.collection_id); setShowDropdown(false); }}
                     >
                       <Folder className="h-3.5 w-3.5 shrink-0 text-muted2" />
-                      {col.name}
+                      <span className="truncate">{col.name}</span>
                     </button>
                   ))}
                 </>
@@ -856,6 +859,15 @@ export default function CollageOverlay({ open, items, catalogKey = null, collect
     setImages(next);
   }
 
+  // Shuffle: a random order of the pool, baked in as manual ordering the way
+  // a swap is, so a custom sort cannot immediately undo it. Both modes.
+  function shuffleOrder() {
+    const base = orderBy === "selection" ? images : orderedImages;
+    if (base.length < 2) return;
+    if (orderBy !== "selection") setOrderBy("selection");
+    setImages(shuffleImages(base));
+  }
+
   function findDropTarget(clientX, clientY) {
     const refs = batchPageRefs.current;
     for (let p = 0; p < groups.length; p++) {
@@ -1200,6 +1212,7 @@ export default function CollageOverlay({ open, items, catalogKey = null, collect
               images={orderedImages}
               onRemoveImage={removeBatchImage}
               onAddImages={() => setShowPicker(true)}
+              onShuffle={shuffleOrder}
             />
           ) : (
           <CollagePanel
@@ -1212,6 +1225,7 @@ export default function CollageOverlay({ open, items, catalogKey = null, collect
             exportWidth={exportWidth}
             onExportWidthChange={setExportWidth}
             onAddImages={() => setShowPicker(true)}
+            onShuffle={shuffleOrder}
             selectedCellIdx={selectedCellIdx}
             selectedCellZoom={selectedCellState.zoom}
             onSelectedZoomChange={(z) => canvasRef.current?.setSelectedZoom(z)}

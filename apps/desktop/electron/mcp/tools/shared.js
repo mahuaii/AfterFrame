@@ -70,17 +70,17 @@ const ONE_OR_MANY = { anyOf: [{ type: "string" }, { type: "array", items: { type
 // a map area is not something a smart collection saves.)
 const FACET_ARG_KEYS = [
   "camera", "lens", "iso_min", "iso_max", "aperture_min", "aperture_max",
-  "focal_min", "focal_max", "date_from", "date_to", "date_within_days", "rating_min", "rating_max", "flag", "orientation", "tag", "tag_match",
-  "asset_type", "extension", "shutter_min", "shutter_max", "people", "annotated",
-  "location_source", "country", "city", "color", "color_tolerance", "caption_contains", "ocr_contains", "path_contains",
+  "focal_min", "focal_max", "date_from", "date_to", "date_within_days", "rating_min", "rating_max", "flag", "orientation", "tag", "tag_match", "tag_group",
+  "asset_type", "extension", "shutter_min", "shutter_max", "people", "annotated", "has_raw",
+  "location_source", "country", "city", "color", "color_tolerance", "caption_contains", "ocr_contains", "path_contains", "name_contains",
 ];
 // The conditions an agent may flip with `exclude`, by the names it sends them
 // under → the sidecar's facet names (db/facets.py).
 const EXCLUDABLE_ARGS = {
-  camera: "camera", lens: "lens", tag: "tag", extension: "extension", orientation: "orientation", flag: "flag",
+  camera: "camera", lens: "lens", tag: "tag", tag_group: "tag_group", extension: "extension", orientation: "orientation", flag: "flag",
   asset_type: "asset_type", location_source: "location_source", country: "country", city: "city",
   color: "color", person_id: "person_group", collection_id: "in_collection",
-  caption_contains: "caption_contains", ocr_contains: "ocr_contains", path_contains: "path_contains",
+  caption_contains: "caption_contains", ocr_contains: "ocr_contains", path_contains: "path_contains", name_contains: "name_contains",
 };
 const oneOrMany = (value) => (Array.isArray(value) ? value : value == null || value === "" ? [] : [value]);
 
@@ -91,7 +91,11 @@ function facetFiltersFrom(source, { groups = true } = {}) {
   }
   if (source.person_id) filters.person_group = String(source.person_id);
   // "The five-star photos of this folder": membership of a folder as a condition.
-  if (source.collection_id) filters.in_collection = String(source.collection_id);
+  // Folders nest; include_descendants counts the folders under it too.
+  if (source.collection_id) {
+    filters.in_collection = String(source.collection_id);
+    if (source.include_descendants === true) filters.in_collection_descendants = true;
+  }
   const excluded = oneOrMany(source.exclude).map((name) => {
     if (!EXCLUDABLE_ARGS[name]) throw new Error(`exclude: '${name}' is not a condition that can be excluded (one of ${Object.keys(EXCLUDABLE_ARGS).join(", ")}).`);
     return EXCLUDABLE_ARGS[name];
@@ -117,7 +121,7 @@ const EXCLUDE_ARG = {
   type: "array",
   items: { type: "string", enum: Object.keys(EXCLUDABLE_ARGS) },
   description: "Conditions to turn into their opposite: exclude ['camera'] with camera 'X' means NOT shot on X; " +
-    "['tag'] means none of the tags; ['collection_id'] means not in that folder. A photo without the value counts as not matching it.",
+    "['tag'] means none of the tags; ['tag_group'] means no tag of the group; ['collection_id'] means not in that folder. A photo without the value counts as not matching it.",
 };
 const ANY_OF_ARG = {
   type: "array",

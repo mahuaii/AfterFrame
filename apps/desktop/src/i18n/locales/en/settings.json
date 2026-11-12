@@ -377,11 +377,15 @@
       },
       "photo": {
         "addTags": "Add Tags…",
+        "removeTags": "Remove Tags…",
         "edit": "Edit",
         "compare": "Compare Two Photos",
         "reveal": "Show in Finder",
         "delete": "Remove from Library",
         "deleteRejected": "Delete Rejected Photos…"
+      },
+      "folder": {
+        "addToTarget": "Add to Target Folder"
       },
       "select": {
         "all": "Select All",

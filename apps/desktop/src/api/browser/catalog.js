@@ -4,8 +4,8 @@
 
 import { familyOf, formatLabel } from "../../../shared/formats.mjs";
 import sampleManifest from "../../../sample-photos/manifest.json";
-import { assets, collections, newAssetId, showDescription } from "./state";
-import { aggregateTags, facetUniverse, matchesFacetFilters, matchesRules, matchesSearch, sortAssets } from "./query";
+import { assets, collections, folderAssetIds, newAssetId, showDescription } from "./state";
+import { aggregateTags, facetUniverse, groupedTagOptions, matchesFacetFilters, matchesRules, matchesSearch, sortAssets } from "./query";
 
 const samplePhotos = import.meta.glob("../../../sample-photos/*.jpg", { query: "?url", import: "default", eager: true });
 const sampleThumbs = import.meta.glob("../../../sample-photos/previews/*.jpg", { query: "?url", import: "default", eager: true });
@@ -22,11 +22,12 @@ async function browseImages({ status = "all", limit = 180, offset = 0, search, s
   return sortAssets(list, sort).slice(offset, offset + limit);
 }
 
-async function browseCollection(collectionId, { limit = 180, offset = 0, search, filters, sort } = {}) {
+// `includeDescendants`: the folders under it too, each photo once.
+async function browseCollection(collectionId, { limit = 180, offset = 0, search, filters, sort, includeDescendants = false } = {}) {
   const row = collections.find((c) => c.collection_id === collectionId);
   if (!row) return [];
   const byId = new Map(assets.map((a) => [a.asset_id, a]));
-  let list = (row.asset_ids || []).map((id) => byId.get(id)).filter(Boolean);
+  let list = folderAssetIds(collectionId, includeDescendants).map((id) => byId.get(id)).filter(Boolean);
   if (search) list = list.filter((a) => matchesSearch(a, search));
   if (filters) list = list.filter((a) => matchesFacetFilters(a, filters));
   // asset_ids is in the order photos were added; the sidecar's default is
@@ -107,7 +108,7 @@ export const catalogMethods = {
         .filter((row) => row.count > 0),
       cameras: counts(metasFor("camera").map((m) => m.camera_model)),
       lenses: counts(metasFor("lens").map((m) => m.lens_model)),
-      tags: aggregateTags(60, "", facetUniverse("tag", view)),
+      ...groupedTagOptions(facetUniverse("tag", view), { picked: [].concat(view.filters?.tag || []) }),
       extensions: counts(facetUniverse("extension", view).map((a) => familyOf(a.file_name)))
         .map((row) => ({ ...row, label: formatLabel(row.value) })),
       iso: minMax("iso", "iso"),
@@ -132,7 +133,7 @@ export const catalogMethods = {
       .sort((a, b) => b.count - a.count || a.make.localeCompare(b.make))
       .map(({ make, count, models }) => ({ make, count, models: [...models.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m) }));
   },
-  searchFacet: async ({ field, q = "", limit = 50, ...view } = {}) => {
+  searchFacet: async ({ field, q = "", limit = 50, group, ...view } = {}) => {
     const needle = String(q).toLowerCase();
     const universe = facetUniverse(field, view);
     const pick = (get) => {
@@ -147,30 +148,56 @@ export const catalogMethods = {
     if (field === "camera") return pick((a) => a.image_metadata?.camera_model);
     if (field === "lens") return pick((a) => a.image_metadata?.lens_model);
     if (field === "extension") return pick((a) => familyOf(a.file_name));
-    if (field === "tag") return aggregateTags(limit, needle, universe);
+    if (field === "tag") return aggregateTags(limit, needle, universe, group || null);
     return [];
   },
 
   // ── browse ──
-  locateImageAsset: async ({ assetId, collectionId, ...scope } = {}) => {
+  locateImageAsset: async ({ assetId, collectionId, includeDescendants, ...scope } = {}) => {
     const rows = collectionId
-      ? await browseCollection(collectionId, { limit: Number.MAX_SAFE_INTEGER })
+      ? await browseCollection(collectionId, { limit: Number.MAX_SAFE_INTEGER, includeDescendants })
       : await browseImages({ ...scope, limit: Number.MAX_SAFE_INTEGER });
     const index = rows.findIndex((row) => row.asset_id === assetId);
     return { index: index < 0 ? null : index };
   },
   browseImages,
+  // Find by list: each keyword against the file names in one place, as the
+  // sidecar's find-by-keywords answers (50 is its FIND_MATCH_LIMIT).
+  findByKeywords: async ({ keywords = [], status = "all", collectionId, includeDescendants, base } = {}) => {
+    let list = assets;
+    if (collectionId) {
+      const member = new Set(folderAssetIds(collectionId, includeDescendants));
+      list = list.filter((a) => member.has(a.asset_id));
+    } else if (base) list = list.filter((a) => matchesRules(a, base));
+    else if (status === "rated") list = list.filter((a) => a.app_rating > 0);
+    else if (status === "matched") list = [];
+    const limit = 50;
+    const seen = new Set();
+    const found = [];
+    for (const keyword of keywords) {
+      const text = String(keyword || "").trim();
+      const folded = text.toLowerCase();
+      if (!folded || seen.has(folded)) continue;
+      seen.add(folded);
+      const hits = list.filter((a) => String(a.stem || a.file_name || "").toLowerCase().includes(folded));
+      found.push({
+        keyword: text,
+        count: hits.length,
+        matches: hits.slice(0, limit).map((a) => ({ asset_id: a.asset_id, file_name: a.file_name || a.stem })),
+      });
+    }
+    return { limit, keywords: found };
+  },
   // The web catalog has no gazetteer; the Discover page falls back to
   // month groups when both lists are empty.
   discoverCollections: async () => ({ places: [], memories: [] }),
   // Location points for the map drawer, scoped like the gallery. Same row
   // shape as the sidecar's browse-map-points; all web points are EXIF-exact.
-  browseMapPoints: async ({ status = "all", collectionId, search, filters, base } = {}) => {
+  browseMapPoints: async ({ status = "all", collectionId, includeDescendants, search, filters, base } = {}) => {
     let list = assets;
     if (base && !collectionId) list = list.filter((a) => matchesRules(a, base));
     if (collectionId) {
-      const row = collections.find((c) => c.collection_id === collectionId);
-      const member = new Set(row?.asset_ids || []);
+      const member = new Set(folderAssetIds(collectionId, includeDescendants));
       list = list.filter((a) => member.has(a.asset_id));
     } else if (!base && status === "rated") list = list.filter((a) => a.app_rating > 0);
     else if (!base && status === "matched") list = [];

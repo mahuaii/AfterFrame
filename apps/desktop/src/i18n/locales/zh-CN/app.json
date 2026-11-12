@@ -112,13 +112,23 @@
     "snapshotName": "{{name}}(快照)",
     "failed": "保存智能合集失败"
   },
+  "targetFolder": {
+    "added_one": "已把 {{count}} 张照片加入「{{name}}」",
+    "added_other": "已把 {{count}} 张照片加入「{{name}}」",
+    "none": "还没有目标文件夹",
+    "noneHint": "新建一个文件夹，或先用右键菜单加入一次，之后按 {{key}} 就会加到那里。",
+    "failed": "加入「{{name}}」失败"
+  },
   "smartCollectionRulesLost": "筛选条件没有存进去。请完全退出并重新打开 AfterFrame,再保存一次。",
   "flagFailed": "旗标保存失败",
   "batchTags": {
     "added_one": "已给 {{count}} 张照片添加标签",
     "added_other": "已给 {{count}} 张照片添加标签",
     "separator": "、",
-    "failed": "标签添加失败"
+    "failed": "标签添加失败",
+    "removed_one": "已从 1 张照片移除标签",
+    "removed_other": "已从 {{count}} 张照片移除标签",
+    "removeFailed": "无法移除标签"
   },
   "rejected": {
     "failed": "无法读取排除的照片",
@@ -137,5 +147,6 @@
     "trashed_other": "已将 {{count}} 张排除的照片移到废纸篓"
   },
   "compareNeedsTwo": "选中两张照片才能对比",
-  "descriptionFailed": "描述保存失败"
+  "descriptionFailed": "描述保存失败",
+  "folderMoveFailed": "无法移动文件夹"
 }

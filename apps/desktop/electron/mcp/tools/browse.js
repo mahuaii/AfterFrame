@@ -61,7 +61,8 @@ module.exports = (ctx) => {
             description: "Pick/reject flag (Lightroom's P/X/U): pick, reject, or none (unflagged). A list means any of them.",
           },
           orientation: { type: "string", enum: ["portrait", "landscape", "square"] },
-          tag: { ...ONE_OR_MANY, description: "Exact tag match. A list means any of them." },
+          tag: { ...ONE_OR_MANY, description: "Exact tag match (any spelling the library knows, aliases included). A list means any of them; see tag_match." },
+          tag_group: { ...ONE_OR_MANY, description: "Photos carrying at least one tag of this tag group (a group_id from list_tags: weather, time, subject, place, ... or a custom group). A list means any of the groups." },
           location_source: {
             anyOf: [{ type: "string", enum: ["exif", "ai", "manual", "none"] }, { type: "array", items: { type: "string", enum: ["exif", "ai", "manual", "none"] } }],
             description: "What the photo's location is based on: exif (GPS), ai (guessed from the image), manual, or none (no location yet). A list means any of them.",
@@ -73,7 +74,8 @@ module.exports = (ctx) => {
           caption_contains: { type: "string", description: "Text the AI description must contain (that field only, unlike query)" },
           ocr_contains: { type: "string", description: "Text that must appear IN the picture (signs, labels), as read by AI annotation" },
           path_contains: { type: "string", description: "Text the file's folder or name must contain" },
-          tag_match: { type: "string", enum: ["any", "all"], description: "With several tags: any of them (default) or all of them" },
+          name_contains: { ...ONE_OR_MANY, description: "Text the file NAME must contain (the photo's, or its paired RAW's; not its folders): '1723' finds B0001723.3FR. A list means any of them, which is how a client's list of picks (file numbers) is looked up." },
+          tag_match: { type: "string", enum: ["any", "all", "by_group"], description: "With several tags: any of them (default), all of them, or by_group: tags of the same group are alternatives while groups stack ((sunny OR cloudy) AND street)" },
           asset_type: { type: "string", enum: ["image", "video", "raw"], description: "Only photos, only videos, or only RAW files" },
           extension: { ...ONE_OR_MANY, description: "File format, as a family ('jpeg' = .jpg/.jpeg/.jfif…, 'heif' = .heic/.heif/.hif, 'tiff', 'png', 'mp4', 'cr3', 'arw'; the values get_facet_values lists) or one extension ('jpg', 'hif'). A list means any of them." },
           shutter_min: { type: "number", description: "Shutter speed lower bound in seconds (e.g. 0.001 for 1/1000s)" },
@@ -81,7 +83,9 @@ module.exports = (ctx) => {
           people: { type: "string", enum: ["with_faces", "without_faces"], description: "Filter by detected faces" },
           person_id: { type: "string", description: "Only photos of this person (a people group id from list_people)" },
           annotated: { type: "string", enum: ["with", "without"], description: "Whether AI annotation exists" },
+          has_raw: { type: "boolean", description: "true: only photos with their RAW file paired (bound on import or confirmed by hand); false: only photos without one" },
           collection_id: { type: "string", description: "Only photos in this folder (a manual collection from manage_collections)" },
+          include_descendants: { type: "boolean", description: "With collection_id: photos in the folders under it count too (folders nest), each once. Default false." },
           exclude: EXCLUDE_ARG,
           any_of: ANY_OF_ARG,
           geo: {
@@ -194,15 +198,28 @@ module.exports = (ctx) => {
     },
     {
       name: "list_tags",
-      description: "All tags in the catalog with usage counts — for tag autocomplete and 'what tags exist' questions.",
+      description:
+        "The catalog's tags by tag group, with usage counts, pins and aliases (other spellings that resolve to the tag, " +
+        "e.g. the Chinese name of an English tag). Built-in groups: weather, season, time, light, subject, place, event, gear, " +
+        "technique, style, color, mood, workflow (workflow is the user's own; AI never fills it); users add custom groups. " +
+        "`groups` lists each group with its tags, `ungrouped` the tags in no group, `tags` the same flat. " +
+        "Use manage_tags to move, rename, merge, delete or pin tags and to edit groups.",
       inputSchema: {
         type: "object",
-        properties: { limit: { type: "number", description: "Default all" } },
+        properties: {
+          group: { type: "string", description: "Only this group id, or 'ungrouped'" },
+          query: { type: "string", description: "Only tags (or aliases) containing this text" },
+          limit: { type: "number", description: "Max tags per group, most used first (default all)" },
+        },
       },
       async handler(args) {
         requireCatalog();
-        const tags = await commands.listTags(args.limit);
-        return { count: tags.length, tags };
+        const listed = await commands.listTags({ limit: args.limit, query: args.query, group: args.group });
+        const flat = [
+          ...listed.groups.flatMap((group) => group.tags.map((entry) => ({ ...entry, group_id: group.group_id }))),
+          ...listed.ungrouped.map((entry) => ({ ...entry, group_id: null })),
+        ];
+        return { count: flat.length, groups: listed.groups, ungrouped: listed.ungrouped, tags: flat };
       },
     },
     {
@@ -217,6 +234,7 @@ module.exports = (ctx) => {
         properties: {
           query: { type: "string", description: "Free-text scope, same as search_assets query" },
           collection_id: { type: "string" },
+          include_descendants: { type: "boolean", description: "With collection_id: the folders under it too" },
           min_precision: { type: "string", enum: ["exact", "locality", "admin1", "country"], description: "Default locality" },
           limit: { type: "number", description: "Default 5000" },
         },
@@ -225,6 +243,7 @@ module.exports = (ctx) => {
         requireCatalog();
         const points = await commands.browseMapPoints({
           collectionId: args.collection_id,
+          includeDescendants: args.include_descendants === true,
           search: args.query,
           minPrecision: args.min_precision,
           limit: args.limit || 5000,

@@ -2,13 +2,15 @@ import { formatLabel } from "../../shared/formats.mjs";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import api from "../api";
 import { useTranslation } from "react-i18next";
-import { X, ScanFace, Sparkles, Map as MapIcon, Split } from "lucide-react";
+import { X, ScanFace, Sparkles, Map as MapIcon, Split, ListChecks } from "lucide-react";
 import { activeFilterCount, isEmptyValue } from "../hooks/workspaceLogic";
 import { usePref } from "../hooks/usePref";
 import { ACTION_CHIP } from "./filters/Popover";
 import { setOrDelete, toList, fromList } from "./filters/filterValues";
 import TextContainsPopover from "./filters/TextContainsPopover";
 import ListPopover from "./filters/ListPopover";
+import TagGroupPopover from "./filters/TagGroupPopover";
+import { tagMatchMode, tagMatchModes } from "./tags/tagGroups";
 import RangePopover from "./filters/RangePopover";
 import DateRangePopover from "./filters/DateRangePopover";
 import PersonFilterPopover from "./filters/PersonFilterPopover";
@@ -40,7 +42,7 @@ const checkHiddenFacets = (value) => (Array.isArray(value) ? value.filter((id) =
 // `embedded`: one group inside the condition-groups dialog. It starts with
 // only its active facets showing ("Add condition" reveals the rest), keeps no
 // preferences, and has no actions, map chip or groups of its own.
-export default function FilterBar({ facetValues, facetsReady = true, filters, onChange, personGroup, onPersonGroup, facetScope, smart, folders = [], onEditGroups, embedded = false }) {
+export default function FilterBar({ facetValues, facetsReady = true, filters, onChange, personGroup, onPersonGroup, facetScope, smart, folders = [], onEditGroups, onEditNames, embedded = false }) {
   const { t, i18n } = useTranslation("nav");
   const f = filters || {};
   const cameras = facetValues?.cameras || [];
@@ -48,6 +50,8 @@ export default function FilterBar({ facetValues, facetsReady = true, filters, on
   const tags = facetValues?.tags || [];
   const extensions = facetValues?.extensions || [];
   const locationSources = facetValues?.location_sources || [];
+  // With / without a bound RAW file; empty until the catalog has any pairing.
+  const rawOptions = facetValues?.has_raw || [];
   const countries = facetValues?.countries || [];
   const cities = facetValues?.cities || [];
   // Places are stored by their canonical value (ISO code, English city name)
@@ -73,8 +77,14 @@ export default function FilterBar({ facetValues, facetsReady = true, filters, on
     const known = option || cities.find((c) => c.value === value);
     return (chinese && known?.label_zh) || String(value);
   };
-  const folderLabel = (value) => folders.find((c) => c.collection_id === value)?.name || String(value);
+  // Folders nest: the chip and the list say where a folder sits ("Trips / Japan").
+  const folderLabel = (value) => {
+    const folder = folders.find((c) => c.collection_id === value);
+    return folder?.path || folder?.name || String(value);
+  };
   const activeCount = activeFilterCount(f);
+  // A client's list of picks, applied from "Find by List…" (FindByListDialog).
+  const names = toList(f.name_contains);
 
   const slotActive = (id) => FACET_SLOTS.find((slot) => slot.id === id).keys.some((key) => !isEmptyValue(f[key]));
   // The main bar's hidden facets are remembered; a group's dialog (embedded)
@@ -108,13 +118,13 @@ export default function FilterBar({ facetValues, facetsReady = true, filters, on
     mode: excludedFacets.includes(facet) ? "exclude" : "include",
     onMode: (mode) => onChange(withExcluded(f, facet, mode === "exclude")),
   });
-  const tagModes = toList(f.tag).length > 1 ? ["any", "all", "exclude"] : ["include", "exclude"];
-  const tagMode = excludedFacets.includes("tag") ? "exclude" : f.tag_match === "all" ? "all" : tagModes[0];
+  const tagModes = tagMatchModes(toList(f.tag).length);
+  const tagMode = tagMatchMode({ excluded: excludedFacets.includes("tag"), tagMatch: f.tag_match, pickedCount: toList(f.tag).length });
   const shows = (id) => !hidden.includes(id) || slotActive(id);
   const slotLabel = (id) => ({
     camera: t("filter.camera"), lens: t("filter.lens"), tag: t("filter.tag"), extension: t("filter.format"),
     location_source: t("filter.locationSource.label"), country: t("filter.country"), city: t("filter.city"),
-    text: t("filter.textContains"), color: t("filter.color"), people: t("filter.people"), annotated: t("filter.annotated"),
+    text: t("filter.textContains"), color: t("filter.color"), people: t("filter.people"), annotated: t("filter.annotated"), has_raw: t("filter.hasRaw.label"),
     person_group: t("filter.person"), in_collection: t("filter.folder"), iso: t("filter.iso"), aperture: t("filter.aperture"),
     focal: t("filter.focal"), date: t("filter.date"), rating: t("filter.rating"), flag: t("filter.flag"), orientation: t("filter.orientation.label"),
   })[id];
@@ -168,6 +178,40 @@ export default function FilterBar({ facetValues, facetsReady = true, filters, on
           el.scrollLeft += event.deltaY;
         }}
       >
+      {/* A client's list of picks, on the bar only while it narrows the grid
+          and first in the row, where it cannot scroll out of sight: the list
+          is made in "Find by List…", which the chip opens again; the cross
+          takes it off. */}
+      {names.length > 0 && (
+        <span
+          className="flex h-6 shrink-0 items-center rounded-md border border-accent/50 bg-accent/10 text-[11px] text-text"
+          data-testid="name-filter-chip"
+          data-excluded={excludedFacets.includes("name_contains") ? "true" : undefined}
+        >
+          <button
+            type="button"
+            onClick={onEditNames}
+            disabled={!onEditNames}
+            title={names.join(", ")}
+            className="flex h-full items-center gap-1 pl-2 pr-1 disabled:cursor-default"
+          >
+            <ListChecks className="h-3 w-3 shrink-0" />
+            <span className="max-w-[160px] truncate tabular-nums">
+              {names.length > 1 ? t("filter.pickedMore", { first: names[0], count: names.length - 1 }) : names[0]}
+            </span>
+          </button>
+          <button
+            type="button"
+            aria-label={t("filter.clearFileNames")}
+            title={t("filter.clearFileNames")}
+            onClick={() => onChange(setFacet("name_contains", "name_contains", undefined))}
+            className="flex h-full items-center pl-0.5 pr-1.5 text-muted2 hover:text-text"
+            data-testid="name-filter-clear"
+          >
+            <X className="h-2.5 w-2.5" />
+          </button>
+        </span>
+      )}
       {/* A facet with nothing to offer is hidden — unless it is filtering: counts
           follow the other filters, so its options can run out while its own
           pick is still in force, and that pick must stay reachable. */}
@@ -177,18 +221,25 @@ export default function FilterBar({ facetValues, facetsReady = true, filters, on
       {shows("lens") && (lenses.length > 0 || toList(f.lens).length > 0) && (
         <ListPopover label={t("filter.lens")} value={f.lens} options={lenses} {...exclusion("lens")} onSelect={(v) => onChange(setFacet("lens", "lens", v))} />
       )}
-      {shows("tag") && (tags.length > 0 || toList(f.tag).length > 0) && (
-        <ListPopover
-          label={t("filter.tag")}
+      {shows("tag") && (tags.length > 0 || toList(f.tag).length > 0 || toList(f.tag_group).length > 0) && (
+        <TagGroupPopover
           value={f.tag}
+          groupValue={f.tag_group}
           options={tags}
-          onSearch={(q) => api.searchFacet({ field: "tag", q, limit: 60, ...(facetScope || {}) })}
-          // "All" only means something with several tags; a single pick drops it.
+          groups={facetValues?.tag_groups || []}
+          ungroupedCount={facetValues?.ungrouped_tag_count || 0}
+          onSearch={(q, group) => api.searchFacet({ field: "tag", q, group, limit: 60, ...(facetScope || {}) })}
+          // A match mode only means something with several tags; a single pick drops it.
           onSelect={(v) => onChange(setOrDelete(setFacet("tag", "tag", v), "tag_match", Array.isArray(v) ? f.tag_match : undefined))}
+          // "Any tag of the group" shares the chip and the exclude switch with the tags.
+          onSelectGroups={(v) => onChange(setFacet("tag_group", "tag_group", v))}
           modes={tagModes}
           mode={tagMode}
-          onMode={(mode) => onChange(setOrDelete(withExcluded(f, "tag", mode === "exclude"), "tag_match", mode === "all" ? "all" : undefined))}
-          excludeKey="filter.excludedTag"
+          onMode={(mode) => onChange(setOrDelete(
+            withExcluded(withExcluded(f, "tag", mode === "exclude"), "tag_group", mode === "exclude" && toList(f.tag_group).length > 0),
+            "tag_match", mode === "all" || mode === "by_group" ? mode : undefined,
+          ))}
+          excluded={excludedFacets.includes("tag")}
         />
       )}
       {shows("extension") && (extensions.length > 0 || toList(f.extension).length > 0) && (
@@ -276,6 +327,16 @@ export default function FilterBar({ facetValues, facetsReady = true, filters, on
           <Sparkles className="h-3 w-3" />
           {f.annotated === "without" ? t("filter.notAnnotated") : t("filter.annotated")}
         </button>
+      )}
+
+      {shows("has_raw") && (rawOptions.length > 0 || toList(f.has_raw).length > 0) && (
+        <ListPopover
+          label={t("filter.hasRaw.label")}
+          value={f.has_raw}
+          options={rawOptions}
+          labelOf={(value) => t(`filter.hasRaw.${value}`, { defaultValue: String(value) })}
+          onSelect={(v) => onChange(setFacet("has_raw", "has_raw", v))}
+        />
       )}
 
       {shows("person_group") && api.can("people") && (

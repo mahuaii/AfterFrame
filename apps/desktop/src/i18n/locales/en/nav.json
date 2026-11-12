@@ -51,7 +51,10 @@
       "show": "Show map",
       "hide": "Hide map"
     },
-    "displayMode": "Layout"
+    "displayMode": "Layout",
+    "withSubfolders": "Showing subfolders too",
+    "thisFolderOnly": "Showing this folder only",
+    "findList": "Find by List…"
   },
   "discover": {
     "recentTitle": "Recently Added",
@@ -98,7 +101,8 @@
       "count": "Photos",
       "captured": "Capture dates",
       "lastAdded": "Last added",
-      "created": "Created"
+      "created": "Created",
+      "location": "Location"
     },
     "selected_one": "{{count}} folder selected · {{photos}} photos",
     "selected_other": "{{count}} folders selected · {{photos}} photos",
@@ -120,7 +124,11 @@
     "noFolders": "No folders yet",
     "noFoldersHint": "Drag photos onto a folder in the sidebar, or right-click a photo and choose Add to folder.",
     "noMatches": "No folders match “{{query}}”",
-    "noFilterMatches": "No folders match these filters"
+    "noFilterMatches": "No folders match these filters",
+    "newSubfolder": "New subfolder",
+    "moveTo": "Move to…",
+    "topLevel": "Top level",
+    "deleteConfirmMessageTree": "Their subfolders go with them. The photos stay in the library."
   },
   "sidebar": {
     "reorderHint": "Drag to reorder · Option/Alt + ↑/↓",
@@ -141,6 +149,7 @@
     "folders": "Folders",
     "newFolder": "New folder",
     "noFolders": "No folders yet",
+    "targetFolder": "{{keys}} adds the selected photos here",
     "viewCovers": "Show covers",
     "viewList": "Show as list",
     "folderMeta": "{{count}} items",
@@ -159,7 +168,18 @@
     "smartCollections": "Smart collections",
     "snapshotToFolder": "Copy current photos to a folder",
     "smartUnreadable": "Saved by a newer version of AfterFrame",
-    "editSmartRules": "Edit conditions"
+    "editSmartRules": "Edit conditions",
+    "tags": "Tags",
+    "newSubfolder": "New subfolder",
+    "expand": "Expand",
+    "collapse": "Collapse",
+    "moveToRoot": "Drop here to move to the top level",
+    "deleteWithChildrenTitle": "Delete “{{name}}”?",
+    "deleteWithChildren_one": "Its {{count}} subfolder goes with it. The photos stay in the library.",
+    "deleteWithChildren_other": "Its {{count}} subfolders go with it. The photos stay in the library.",
+    "deleteWithChildrenAction": "Delete folder",
+    "deleteCancel": "Cancel",
+    "folderPath": "{{path}}"
   },
   "people": {
     "title": "People",
@@ -230,6 +250,11 @@
     "annotated": "AI annotated",
     "notAnnotated": "Not annotated",
     "annotatedHint": "Filter by AI annotation presence — click to cycle with / without / off",
+    "hasRaw": {
+      "label": "RAW",
+      "true": "With RAW",
+      "false": "No RAW"
+    },
     "iso": "ISO",
     "aperture": "Aperture",
     "focal": "Focal",
@@ -260,7 +285,8 @@
     "pickedMore": "{{first}} +{{count}}",
     "match": {
       "any": "Any of these",
-      "all": "All of these"
+      "all": "All of these",
+      "byGroup": "By group"
     },
     "locationSource": {
       "label": "Location",
@@ -325,7 +351,13 @@
       "landscape": "Landscape",
       "portrait": "Portrait",
       "square": "Square"
-    }
+    },
+    "tagGroupPick": "Any {{group}} tag",
+    "tagMore_one": "{{count}} more",
+    "tagMore_other": "{{count}} more",
+    "ungrouped": "Ungrouped",
+    "anyInGroup": "Any tag of this group",
+    "clearFileNames": "Remove this list"
   },
   "activity": {
     "title": "Background Activity",
@@ -412,7 +444,9 @@
       "copyName": "Copy Name",
       "openWith": "Open With",
       "flag": "Flag",
-      "addTags": "Add Tags…"
+      "addTags": "Add Tags…",
+      "removeTags_one": "Remove Tags…",
+      "removeTags_other": "Remove Tags…"
     }
   },
   "map": {
@@ -432,5 +466,83 @@
     "reject": "Rejected",
     "none": "Remove Flag",
     "unflagged": "No Flag"
+  },
+  "tagGroups": {
+    "weather": "Weather",
+    "season": "Season",
+    "time": "Time of day",
+    "light": "Light",
+    "subject": "Subject",
+    "place": "Place type",
+    "event": "Occasion",
+    "gear": "Gear",
+    "technique": "Technique",
+    "style": "Style",
+    "color": "Color",
+    "mood": "Mood",
+    "workflow": "Workflow"
+  },
+  "tags": {
+    "title": "Tags",
+    "search": "Search tags",
+    "sort": {
+      "usage": "Most used",
+      "name": "Name"
+    },
+    "newGroup": "New group",
+    "groupNamePlaceholder": "Group name",
+    "ungrouped": "Ungrouped",
+    "emptyGroup": "No tags yet",
+    "empty": "No tags yet. AI annotation and the Inspector add them.",
+    "photos_one": "{{count}} photo",
+    "photos_other": "{{count}} photos",
+    "open": "Show photos",
+    "openHint": "Show the photos with this tag",
+    "moveTo": "Move to…",
+    "rename": "Rename",
+    "pin": "Pin",
+    "unpin": "Unpin",
+    "delete": "Delete",
+    "cancel": "Cancel",
+    "mergeInto": "Merge into…",
+    "mergePlaceholder": "Tag that remains",
+    "selected_one": "{{count}} tag",
+    "selected_other": "{{count}} tags",
+    "clearSelection": "Clear selection",
+    "renameGroup": "Rename group",
+    "deleteGroup": "Delete group",
+    "aiFill": "Let AI fill this group",
+    "aiOff": "AI annotation does not fill this group",
+    "aiOffShort": "manual",
+    "regroup": "Group by vocabulary",
+    "deleteConfirmOne": "Delete the tag “{{tag}}”?",
+    "deleteConfirmMany": "Delete {{count}} tags?",
+    "deleteConfirmMessage": "It comes off {{count}} photos. This cannot be undone.",
+    "deleteGroupConfirm": "Delete the group “{{name}}”?",
+    "deleteGroupMessage": "Its {{count}} tags become ungrouped; no photo loses a tag.",
+    "loadFailed": "Could not load tags",
+    "editFailed": "Could not change tags"
+  },
+  "findList": {
+    "title": "Find by List",
+    "placeholder": "Paste a list of numbers or file names\n1723, 1746 1754",
+    "none": "Not found",
+    "broad": "Matches {{count}} photos: too broad, left out",
+    "found_one": "{{count}} photo found",
+    "found_other": "{{count}} photos found",
+    "missing_one": "{{count}} not found",
+    "missing_other": "{{count}} not found",
+    "tooBroad_one": "{{count}} too broad",
+    "tooBroad_other": "{{count}} too broad",
+    "destination": "Add to",
+    "newFolder": "New Folder",
+    "defaultFolder": "Untitled",
+    "cancel": "Cancel",
+    "apply_one": "Add {{count}} Photo",
+    "apply_other": "Add {{count}} Photos",
+    "added_one": "Added {{count}} photo to “{{name}}”",
+    "added_other": "Added {{count}} photos to “{{name}}”",
+    "failed": "Couldn't add to the folder",
+    "filter": "Filter"
   }
 }

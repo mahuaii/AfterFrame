@@ -442,6 +442,74 @@ def _migrate_to_12(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_asset_visual_group ON asset_visual(dup_group)")
 
 
+def _migrate_to_13(connection: sqlite3.Connection) -> None:
+    """Nested folders. The collections table has carried parent_collection_id
+    since it was created, unused; this makes sure of the column on every
+    catalog, indexes it (children are looked up by parent) and clears a
+    parent that no longer exists, so every folder has a place in the tree.
+    A catalog from before collections existed has no table yet: init_db
+    creates it, in its current shape, right after the chain."""
+    if not _table_exists(connection, "collections"):
+        return
+    ensure_column(
+        connection, "collections", "parent_collection_id",
+        "TEXT REFERENCES collections(collection_id) ON DELETE SET NULL",
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_collections_parent ON collections(parent_collection_id)")
+    connection.execute(
+        """
+        UPDATE collections SET parent_collection_id = NULL
+        WHERE parent_collection_id IS NOT NULL
+          AND (parent_collection_id = collection_id
+               OR parent_collection_id NOT IN (SELECT collection_id FROM collections WHERE kind = 'manual'))
+        """
+    )
+
+
+def _migrate_to_14(connection: sqlite3.Connection) -> None:
+    """Tags become entities with groups and aliases (db/tags.py). The
+    built-in groups are created; every tag a photo carries gets its row; the
+    vocabulary gives the tags it knows their group and their other-language
+    spelling as an alias; a concept the library has under both spellings is
+    merged into the more-used one (the other spelling stays an alias, so
+    search still finds it and the app shows it in its own language)."""
+    from . import tags as tag_entities
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS tag_groups (
+            group_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('builtin', 'custom')),
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            ai_fill INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS tag_groups_deleted (
+            group_id TEXT PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS tags (
+            tag TEXT PRIMARY KEY,
+            group_id TEXT REFERENCES tag_groups(group_id) ON DELETE SET NULL,
+            pinned INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_tags_group ON tags(group_id);
+        CREATE TABLE IF NOT EXISTS tag_aliases (
+            alias TEXT PRIMARY KEY,
+            tag TEXT NOT NULL REFERENCES tags(tag) ON UPDATE CASCADE ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_tag_aliases_tag ON tag_aliases(tag);
+        """
+    )
+    tag_entities.ensure_builtin_groups(connection)
+    if _table_exists(connection, "asset_tags"):
+        tag_entities.ensure_tag_rows(connection)
+        tag_entities.merge_vocabulary_pairs(connection)
+        tag_entities.regroup_by_vocabulary(connection, only_ungrouped=True, commit=False)
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     3: _migrate_to_3,
     4: _migrate_to_4,
@@ -453,6 +521,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     10: _migrate_to_10,
     11: _migrate_to_11,
     12: _migrate_to_12,
+    13: _migrate_to_13,
+    14: _migrate_to_14,
 }
 
 
